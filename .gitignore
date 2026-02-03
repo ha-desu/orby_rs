@@ -1,0 +1,28 @@
+# --- Rust ---
+/target/
+Cargo.toml.orig
+Cargo.toml.save
+
+# --- Logs & Temporaries ---
+*.log
+*.swp
+*.tmp
+**/*.rs.bk
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- IDEs ---
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# --- Database & Performance (Orby specific) ---
+db_data/*
+!db_data/.gitkeep
+
+# もしルートに生成されてしまった場合の保険
+*.orby
+*.aof
