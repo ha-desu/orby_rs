@@ -1,16 +1,16 @@
 use super::*;
-use crate::OrbyRow;
+use crate::row::PulseCellPack;
 
 #[tokio::test]
 async fn test_insert() {
     let label = "test_insert";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Fixed)
+    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
         .await
         .unwrap();
 
     let val1 = (7u128 << 76) | 12345;
     let val2 = (7u128 << 76) | 67890;
-    let row = OrbyRow::new([val1, val2]);
+    let row = PulseCellPack::new([val1, val2]);
 
     engine.insert_fixed(vec![row]).await.unwrap();
     assert_eq!(engine.len(), 1);
@@ -19,7 +19,7 @@ async fn test_insert() {
 #[tokio::test]
 async fn test_query_injection() {
     let label = "test_query";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Fixed)
+    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
         .await
         .unwrap();
 
@@ -40,7 +40,7 @@ async fn test_query_injection() {
 #[tokio::test]
 async fn test_query_iter() {
     let label = "test_iter";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Fixed)
+    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
         .await
         .unwrap();
 
@@ -58,50 +58,17 @@ async fn test_query_iter() {
 }
 
 #[tokio::test]
-async fn test_padded_dimension_alignment() {
+async fn test_stride_alignment() {
     let label = "test_alignment";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Fixed)
+    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
         .await
         .unwrap();
 
-    let padded_dim = engine.inner.read().padded_dimension;
+    let padded_dim = engine.inner.read().stride;
     assert_eq!(
         padded_dim, 4,
-        "Dimension 2 should result in padded_dimension 4 for 64-byte alignment"
+        "Dimension 2 should result in stride 4 for 64-byte alignment"
     );
-}
-
-#[tokio::test]
-async fn test_fixed_limit_swap_remove() {
-    let label = "test_fixed";
-    let engine = Orby::builder(label)
-        .capacity(3)
-        .dimension(1)
-        .logic_mode(LogicMode::Fixed)
-        .build()
-        .await
-        .unwrap();
-
-    engine
-        .insert_batch(&[[100u128], [200u128], [300u128]])
-        .await
-        .unwrap();
-
-    let res = engine.insert_batch(&[[400u128]]).await;
-    assert!(res.is_err());
-
-    let results = engine.query_raw(|_| true, 10);
-    assert_eq!(results.len(), 3);
-    assert_eq!(results[0][0], 300);
-    assert_eq!(results[2][0], 100);
-
-    engine.purge_by_id(0, 200).await;
-    assert_eq!(engine.len(), 2);
-
-    let results2 = engine.query_raw(|_| true, 10);
-    assert_eq!(results2.len(), 2);
-    assert_eq!(results2[0][0], 300);
-    assert_eq!(results2[1][0], 100);
 }
 
 #[tokio::test]
@@ -204,7 +171,7 @@ async fn test_mirror_persistence() {
     let engine = Orby::builder(label)
         .capacity(10)
         .dimension(2)
-        .logic_mode(LogicMode::Fixed)
+        .logic_mode(LogicMode::Ring)
         .with_storage(SaveMode::Sync(Some(temp_dir.clone())))
         .build()
         .await

@@ -13,12 +13,8 @@ impl Drop for CleanupGuard {
         let files = [
             "db_data/bench_sync_ring.orby",
             "db_data/bench_direct_ring.orby",
-            "db_data/bench_sync_fixed.orby",
-            "db_data/bench_direct_fixed.orby",
             "db_data/bench_sync_ring.aof",
             "db_data/bench_direct_ring.aof",
-            "db_data/bench_sync_fixed.aof",
-            "db_data/bench_direct_fixed.aof",
         ];
         for f in files {
             let _ = fs::remove_file(f);
@@ -93,8 +89,6 @@ fn bench_comparison(c: &mut Criterion) {
     // Prepare paths
     let sync_ring_path = PathBuf::from("db_data/bench_sync_ring.orby");
     let direct_ring_path = PathBuf::from("db_data/bench_direct_ring.orby");
-    let sync_fixed_path = PathBuf::from("db_data/bench_sync_fixed.orby");
-    let direct_fixed_path = PathBuf::from("db_data/bench_direct_fixed.orby");
 
     // Setup Ring Engines
     let engine_mem_ring = rt.block_on(async {
@@ -130,47 +124,6 @@ fn bench_comparison(c: &mut Criterion) {
             dimension,
             SaveMode::Direct(Some(direct_ring_path.clone())),
             LogicMode::Ring,
-        )
-        .await
-        .unwrap();
-        obs.insert_batch(&data).await.unwrap();
-        obs
-    });
-
-    // Setup Fixed Engines
-    let engine_mem_fixed = rt.block_on(async {
-        let obs = Orby::new(
-            "fixed_mem",
-            total_records,
-            dimension,
-            SaveMode::MemoryOnly,
-            LogicMode::Fixed,
-        )
-        .await
-        .unwrap();
-        obs.insert_batch(&data).await.unwrap();
-        obs
-    });
-    let engine_sync_fixed = rt.block_on(async {
-        let obs = Orby::new(
-            "fixed_sync",
-            total_records,
-            dimension,
-            SaveMode::Sync(Some(sync_fixed_path.clone())),
-            LogicMode::Fixed,
-        )
-        .await
-        .unwrap();
-        obs.insert_batch(&data).await.unwrap();
-        obs
-    });
-    let engine_direct_fixed = rt.block_on(async {
-        let obs = Orby::new(
-            "fixed_direct",
-            total_records,
-            dimension,
-            SaveMode::Direct(Some(direct_fixed_path.clone())),
-            LogicMode::Fixed,
         )
         .await
         .unwrap();
@@ -214,29 +167,6 @@ fn bench_comparison(c: &mut Criterion) {
     group.bench_function("04_Orby_Ring_Direct", |b| {
         b.iter(|| {
             let res = engine_direct_ring
-                .query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
-            black_box(res);
-        })
-    });
-
-    // Fixed Logic
-    group.bench_function("05_Orby_Fixed_MemoryOnly", |b| {
-        b.iter(|| {
-            let res =
-                engine_mem_fixed.query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
-            black_box(res);
-        })
-    });
-    group.bench_function("06_Orby_Fixed_Sync", |b| {
-        b.iter(|| {
-            let res =
-                engine_sync_fixed.query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
-            black_box(res);
-        })
-    });
-    group.bench_function("07_Orby_Fixed_Direct", |b| {
-        b.iter(|| {
-            let res = engine_direct_fixed
                 .query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
             black_box(res);
         })
