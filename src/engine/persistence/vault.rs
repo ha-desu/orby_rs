@@ -137,8 +137,8 @@ impl Orby {
         Ok(())
     }
 
-    /// メモリ上の全データをディスクに書き出し、完全に同期します。
-    /// データの揮発を防ぐためのメンテナンスコマンドです。
+    /// Writes all in-memory data to disk and synchronizes completely.
+    /// This is a maintenance command to prevent data volatility.
     pub async fn sleep(&self) -> Result<(), OrbyError> {
         let inner = self.inner.clone();
 

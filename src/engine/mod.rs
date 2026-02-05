@@ -15,19 +15,43 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use sysinfo::System;
 
-/// `Orby` は、固定長128-bitデータの等価比較と時系列スキャンに特化した高速なインメモリ・インデックスエンジンです。
+/// High-performance in-memory index engine specialized for 128-bit fixed-length data scanning.
 #[derive(Clone)]
 pub struct Orby {
     pub(crate) inner: Arc<RwLock<OrbyRingBufferSilo>>,
 }
 
 impl Orby {
-    /// 新しい Builder を生成します。
+    /// Creates a new `OrbyBuilder` with the specified label.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use orby::Orby;
+    /// let builder = Orby::builder("my_ring");
+    /// ```
     pub fn builder(label: &str) -> OrbyBuilder {
         OrbyBuilder::new(label)
     }
 
-    /// 主要な設定を引数に指定して、新しい `Orby` インスタンスを初期化します。
+    /// Initializes a new `Orby` instance with primary configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use orby::{Orby, SaveMode, LogicMode};
+    ///
+    /// # async fn example() -> Result<(), orby::error::OrbyError> {
+    /// let orby = Orby::new(
+    ///     "example_ring",
+    ///     1000,
+    ///     2,
+    ///     SaveMode::MemoryOnly,
+    ///     LogicMode::RingBuffer,
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn new(
         label: &str,
         ring_buffer_lane_item_count: usize,
@@ -44,8 +68,8 @@ impl Orby {
             .await
     }
 
-    /// ストアのメタ情報を取得します。
-    /// 返り値: (現在のデータ件数, 最大キャパシティ, レーン数)
+    /// Returns the metadata of the store.
+    /// Returns: (current_length, capacity, lane_count)
     pub fn meta(&self) -> (usize, usize, usize) {
         let store = self.inner.read();
         (store.len, store.capacity, store.ring_buffer_lane_count)
@@ -133,19 +157,25 @@ impl Orby {
         })
     }
 
+    /// Returns the name of the ring buffer.
     pub fn name(&self) -> String {
         self.inner.read().name.clone()
     }
+    /// Returns the current number of elements in the ring buffer.
     pub fn len(&self) -> usize {
         self.inner.read().len
     }
+    /// Returns the count of active cells (non-zero entries) in the primary lane.
     pub fn count_active(&self) -> usize {
         let store = self.inner.read();
         crate::logic::ring::count_active(&store)
     }
+    /// Returns true if the ring buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.inner.read().len == 0
     }
+    /// Deletes the data at the specified index.
+    /// Returns true if the deletion was successful.
     pub async fn delete(&self, index: usize) -> bool {
         let (res, has_vault, compaction) = {
             let mut store = self.inner.write();

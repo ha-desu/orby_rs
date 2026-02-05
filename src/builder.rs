@@ -3,7 +3,7 @@ use crate::error::OrbyError;
 use crate::types::{LogicMode, SaveMode};
 use std::path::PathBuf;
 
-/// `Orby` インスタンスを柔軟に構築するためのビルダーです。
+/// Builder for creating flexible `Orby` instances.
 pub struct OrbyBuilder {
     pub(crate) ring_name: String,
     pub(crate) ring_buffer_lane_item_count: usize,
@@ -37,75 +37,75 @@ impl OrbyBuilder {
         }
     }
 
-    /// RingBufferのLane数を設定します。
-    /// DBのレコードのフィールド数のような概念です
+    /// Sets the number of lanes (dimensions) in the ring buffer.
+    /// This is conceptually similar to the number of fields in a database record.
     pub fn ring_buffer_lane_count(mut self, count: usize) -> Self {
         self.ring_buffer_lane_count = count;
         self
     }
 
-    /// RingBufferのLaneに載せるアイテムの最大数を設定します。
-    /// DBのレコードのような概念ですが1次元のデータリストです
+    /// Sets the maximum number of items (capacity) for each lane in the ring buffer.
     pub fn ring_buffer_lane_item_count(mut self, slots: usize) -> Self {
         self.ring_buffer_lane_item_count = slots;
         self
     }
 
-    /// ストレージの保存モードを設定します。
-    /// MemoryOnly: メモリのみ
-    /// Vault: マルチレーンの特殊永続化
+    /// Sets the storage persistence mode.
+    /// - `MemoryOnly`: In-memory only.
+    /// - `Vault`: Specialized multi-lane persistence.
     pub fn with_storage(mut self, mode: SaveMode) -> Self {
         self.storage_mode = mode;
         self
     }
 
-    /// Orby の物理モードを設定します。
-    /// LogicMode::RingBuffer: 時系列ログ用（古いデータを自動上書き）
+    /// Sets the logic mode of Orby.
+    /// - `LogicMode::RingBuffer`: For time-series logs (automatically overwrites old data).
     pub fn logic_mode(mut self, mode: LogicMode) -> Self {
         self.logic_mode = mode;
         self
     }
 
-    /// 削除時のコンパクション（詰め）動作を設定します。
-    /// true: 削除時にデータをスライドして詰める (Packed Mode)
-    /// false: 削除箇所をゼロ埋めするだけ (Sparse Mode / Ring)
+    /// Sets the compaction behavior upon deletion.
+    /// - `true`: Slide data to fill gaps (Packed Mode).
+    /// - `false`: Zero out the deleted slot (Sparse Mode / Ring).
     pub fn compaction(mut self, enabled: bool) -> Self {
         self.compaction = enabled;
         self
     }
 
-    /// AOF (Append Only File) ログを有効にします。
+    /// Enables AOF (Append Only File) logging.
     pub fn enable_aof(mut self, enabled: bool) -> Self {
         self.aof_enabled = enabled;
         self
     }
 
-    /// 復元元のファイルを指定します。拡張子が .aof ならリプレイ、.orby ならスナップショットとして扱います。
+    /// Specifies the source file for restoration.
+    /// If extension is `.aof`, it replays; if `.orby` (or directory for Vault), it treats as a snapshot/vault.
     pub fn from_file<P: Into<PathBuf>>(mut self, path: P) -> Self {
         self.restore_path = Some(path.into());
         self
     }
 
-    /// メモリ使用率の安全限界を設定します (0.0 ~ 1.0)。
-    /// 1.0 を指定するとチェックを実質的に無効化できます。
+    /// Sets the safety limit for memory usage ratio (0.0 ~ 1.0).
+    /// Specifying 1.0 effectively disables the check.
     pub fn capacity_usage_ratio(mut self, ratio: f64) -> Self {
         self.capacity_usage_ratio = ratio.clamp(0.0, 1.0);
         self
     }
 
-    /// 既存データがある場合に自動でロードするかを設定します。
+    /// Configures whether to automatically load existing data if available.
     pub fn autoload(mut self, enabled: bool) -> Self {
         self.autoload = enabled;
         self
     }
 
-    /// ロード時に厳格な整合性チェックを行うかを設定します。
+    /// Configures whether to perform strict consistency checks during loading.
     pub fn strict_check(mut self, enabled: bool) -> Self {
         self.strict_check = enabled;
         self
     }
 
-    /// メモリ使用量の上限（バイト単位）を設定します。
+    /// Sets the memory usage limit in bytes.
     pub fn memory_limit(mut self, limit_bytes: u64) -> Self {
         self.memory_limit = Some(limit_bytes);
         self
