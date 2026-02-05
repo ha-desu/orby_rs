@@ -137,6 +137,57 @@ impl Orby {
         Ok(())
     }
 
+    /// メモリ上の全データをディスクに書き出し、完全に同期します。
+    /// データの揮発を防ぐためのメンテナンスコマンドです。
+    pub async fn sleep(&self) -> Result<(), OrbyError> {
+        let inner = self.inner.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let store = inner.read();
+            let vault_path = store
+                .vault_path
+                .as_ref()
+                .ok_or_else(|| OrbyError::Custom("Vault path is not set".into()))?;
+
+            if !vault_path.exists() {
+                std::fs::create_dir_all(vault_path)?;
+            }
+
+            use rayon::prelude::*;
+            store
+                .lanes
+                .par_iter()
+                .enumerate()
+                .try_for_each(|(col, lane)| {
+                    let p = vault_path.join(format!("lane_{}.bin", col));
+                    let f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(p)?;
+                    let mut writer = std::io::BufWriter::new(f);
+
+                    use std::io::Write;
+                    for cell in &lane.buffer {
+                        writer.write_all(&cell.as_u128().to_le_bytes())?;
+                    }
+                    writer.flush()?;
+                    writer.get_ref().sync_all()?;
+
+                    Ok::<(), OrbyError>(())
+                })?;
+
+            Ok::<(), OrbyError>(())
+        })
+        .await
+        .map_err(|e| OrbyError::Custom(format!("Blocking task join error: {}", e)))??;
+
+        // Header Update
+        self.commit_vault_header().await?;
+
+        Ok(())
+    }
+
     /// 改ざん防止・アトミック書き込みを伴うコミット処理。
     /// 手順: 1. 全レーン書き込み -> 2. fsync(Lanes) -> 3. ヘッダ更新 -> 4. fsync(Header)
     pub(crate) async fn commit_vault_batch(

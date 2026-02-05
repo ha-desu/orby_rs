@@ -25,7 +25,7 @@ impl OrbyBuilder {
             ring_name: ring_name.to_string(),
             ring_buffer_lane_item_count: 10_000,
             ring_buffer_lane_count: 2,
-            storage_mode: SaveMode::MemoryOnly,
+            storage_mode: SaveMode::Vault(None),
             logic_mode: LogicMode::RingBuffer,
             compaction: false,
             aof_enabled: false,
