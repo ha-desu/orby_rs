@@ -153,30 +153,28 @@ impl Orby {
             )
         };
 
+        let rows = std::sync::Arc::new(rows);
+        let this = self.clone();
+
         tokio::task::spawn_blocking(move || {
-            // 1. Write to all lanes
-            let lane_files: Vec<std::fs::File> = (0..ring_buffer_lane_count)
-                .map(|i| {
-                    let p = vault_path.join(format!("lane_{}.bin", i));
-                    std::fs::OpenOptions::new().write(true).open(p)
+            use rayon::prelude::*;
+
+            (0..ring_buffer_lane_count)
+                .into_par_iter()
+                .try_for_each(|col| {
+                    let p = vault_path.join(format!("lane_{}.bin", col));
+                    let f = std::fs::OpenOptions::new().write(true).open(p)?;
+
+                    let column_data: Vec<u128> = rows
+                        .iter()
+                        .map(|row| row.get(col).copied().unwrap_or(0))
+                        .collect();
+
+                    this.bulk_write_lane_file(&f, index, capacity, &column_data)?;
+                    f.sync_all()?;
+
+                    Ok::<(), OrbyError>(())
                 })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for (row_offset, row) in rows.iter().enumerate() {
-                let physical_idx = (index + row_offset) % capacity;
-                for (col, &val) in row.iter().enumerate() {
-                    if col < ring_buffer_lane_count {
-                        let bytes = val.to_le_bytes();
-                        lane_files[col].write_at(&bytes, (physical_idx * 16) as u64)?;
-                    }
-                }
-            }
-
-            // 2. fsync all lanes
-            for f in &lane_files {
-                f.sync_all()?;
-            }
-            Ok::<(), OrbyError>(())
         })
         .await
         .map_err(|e| OrbyError::Custom(format!("Blocking task join error: {}", e)))??;
