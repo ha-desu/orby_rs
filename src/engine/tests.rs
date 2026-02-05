@@ -64,6 +64,7 @@ async fn test_update_and_upsert() {
     let engine = Orby::builder(label)
         .ring_buffer_lane_item_count(5) // 5 * 2 = 10
         .ring_buffer_lane_count(2)
+        .with_storage(SaveMode::MemoryOnly)
         .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
@@ -96,6 +97,8 @@ async fn test_get_at_and_take() {
     let engine = Orby::builder(label)
         .ring_buffer_lane_item_count(5) // 5 rows
         .ring_buffer_lane_count(1)
+        .ring_buffer_lane_count(1)
+        .with_storage(SaveMode::MemoryOnly)
         .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
@@ -123,6 +126,8 @@ async fn test_find_indices() {
     let engine = Orby::builder(label)
         .ring_buffer_lane_item_count(5)
         .ring_buffer_lane_count(1)
+        .ring_buffer_lane_count(1)
+        .with_storage(SaveMode::MemoryOnly)
         .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
@@ -148,6 +153,8 @@ async fn test_purge_all_data() {
     let engine = Orby::builder(label)
         .ring_buffer_lane_item_count(10)
         .ring_buffer_lane_count(1)
+        .ring_buffer_lane_count(1)
+        .with_storage(SaveMode::MemoryOnly)
         .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
@@ -180,6 +187,7 @@ async fn test_insert_lane_batch() {
     let engine = Orby::builder(label)
         .ring_buffer_lane_item_count(10)
         .ring_buffer_lane_count(3)
+        .with_storage(SaveMode::MemoryOnly)
         .build()
         .await
         .unwrap();

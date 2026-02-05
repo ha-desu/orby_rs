@@ -7,7 +7,7 @@ use std::path::PathBuf;
 async fn test_auto_restore_from_vault() {
     let test_dir = "test_data_auto_restore";
     let name = "test_ring_v2";
-    let sub_dir = PathBuf::from(test_dir).join(name);
+    let _sub_dir = PathBuf::from(test_dir).join(name);
 
     // 1. Clean up previous test data
     if PathBuf::from(test_dir).exists() {
