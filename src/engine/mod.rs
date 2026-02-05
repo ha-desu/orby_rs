@@ -112,7 +112,7 @@ impl Orby {
                 let base_path = opt_path
                     .as_ref()
                     .cloned()
-                    .unwrap_or_else(|| std::path::PathBuf::from("db_data"));
+                    .unwrap_or_else(|| std::path::PathBuf::from(crate::types::DEFAULT_VAULT_DIR));
                 let vault_dir = base_path.join(name);
                 vault_path_buf = Some(vault_dir);
                 (None, None)

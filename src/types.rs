@@ -11,6 +11,8 @@ pub enum SaveMode {
 
 pub const HEADER_SIZE: u64 = 4096;
 pub const STORAGE_MAGIC_V1: &[u8; 16] = b"ORBY_DATA_V1_LE ";
+pub const DEFAULT_VAULT_DIR: &str = "vault_data";
+pub const PULSE_SIZE: usize = 16;
 
 /// Defines the physical behavior (data management strategy) of Orby.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -41,6 +43,9 @@ impl LogicMode {
 #[repr(transparent)]
 pub struct PulseCell(u128); // 完全にプライベートにし、トレイト経由で操作
 
+unsafe impl bytemuck::Pod for PulseCell {}
+unsafe impl bytemuck::Zeroable for PulseCell {}
+
 impl PulseCell {
     /// Creates a new `PulseCell` from a u128 value.
     #[inline]
@@ -48,10 +53,43 @@ impl PulseCell {
         Self(val)
     }
 
+    /// Creates a `PulseCell` with specific components.
+    /// - `data`: Upper 120 bits
+    /// - `lane_id`: Next 4 bits
+    /// - `commit_cycle`: Lower 4 bits
+    pub fn pack(data: u128, lane_id: u8, commit_cycle: u8) -> Self {
+        let mask_data = (data >> 8) << 8;
+        let mask_lane = ((lane_id & 0x0F) as u128) << 4;
+        let mask_cycle = (commit_cycle & 0x0F) as u128;
+        Self(mask_data | mask_lane | mask_cycle)
+    }
+
     /// Returns the inner u128 value.
     #[inline]
     pub fn as_u128(&self) -> u128 {
         self.0
+    }
+
+    #[inline]
+    pub fn data(&self) -> u128 {
+        (self.0 >> 8) << 8
+    }
+
+    #[inline]
+    pub fn lane_id(&self) -> u8 {
+        ((self.0 >> 4) & 0x0F) as u8
+    }
+
+    #[inline]
+    pub fn commit_cycle(&self) -> u8 {
+        (self.0 & 0x0F) as u8
+    }
+
+    /// Updates the CommitCycle (lower 4 bits).
+    pub fn with_commit_cycle(&self, cycle: u8) -> Self {
+        let mask = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0;
+        let cycle_val = (cycle & 0x0F) as u128;
+        Self((self.0 & mask) | cycle_val)
     }
 }
 

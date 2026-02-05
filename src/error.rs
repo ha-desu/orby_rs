@@ -26,6 +26,10 @@ pub enum OrbyError {
     #[error("Orby: Internal consistency check failed for '{name}': {message}")]
     InconsistentState { name: String, message: String },
 
+    /// 書き込み不整合（CommitCycle不一致）
+    #[error("Orby: Inconsistent write detected in pool '{pool_name}'. Rollback required.")]
+    InconsistentWrite { pool_name: String },
+
     /// ストレージ（AOF）操作エラー
     #[error("Orby: Storage I/O error for '{name}': {source}")]
     StorageError {

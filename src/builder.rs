@@ -143,7 +143,7 @@ impl OrbyBuilder {
                     let base_path = opt_path
                         .as_ref()
                         .cloned()
-                        .unwrap_or_else(|| PathBuf::from("db_data"));
+                        .unwrap_or_else(|| PathBuf::from(crate::types::DEFAULT_VAULT_DIR));
                     let vault_dir = base_path.join(&ring_name);
 
                     if vault_dir.exists() && autoload {
