@@ -204,7 +204,6 @@ impl OrbyBuilder {
             .unwrap_or_default();
         match extension.as_str() {
             "aof" => engine.replay_aof(path).await?,
-            "orby" => engine.restore_from_storage(path).await?,
             _ if path.is_dir() => engine.restore_from_vault().await?,
             _ => {
                 return Err(OrbyError::IoError(format!(

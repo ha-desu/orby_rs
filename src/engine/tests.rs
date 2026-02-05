@@ -143,38 +143,6 @@ async fn test_find_indices() {
 }
 
 #[tokio::test]
-async fn test_snapshot_generation() {
-    let label = "test_snapshot";
-    let engine = Orby::builder(label)
-        .ring_buffer_lane_item_count(5)
-        .ring_buffer_lane_count(2)
-        .logic_mode(LogicMode::RingBuffer)
-        .build()
-        .await
-        .unwrap();
-
-    engine.insert_batch(&[[1, 2], [3, 4]]).await.unwrap();
-
-    let temp_dir = std::env::temp_dir();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let snapshot_path = temp_dir.join(format!("{}_{}.snapshot", label, now));
-
-    engine
-        .write_snapshot_to_file(snapshot_path.clone())
-        .await
-        .unwrap();
-
-    let file = tokio::fs::File::open(&snapshot_path).await.unwrap();
-    let meta = file.metadata().await.unwrap();
-    assert_eq!(meta.len(), crate::types::HEADER_SIZE + 160);
-
-    let _ = tokio::fs::remove_file(&snapshot_path).await;
-}
-
-#[tokio::test]
 async fn test_purge_all_data() {
     let label = "test_purge_all_data";
     let engine = Orby::builder(label)
