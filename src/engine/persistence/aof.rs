@@ -91,6 +91,21 @@ impl Orby {
                 crate::logic::AOF_OP_TRUNCATE => {
                     self.purge_all_data(Vec::<[u128; 1]>::new()).await?;
                 }
+                crate::logic::AOF_OP_LANE_BATCH => {
+                    let lane_idx =
+                        u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap()) as usize;
+                    pos += 4;
+                    let count =
+                        u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap()) as usize;
+                    pos += 4;
+                    let mut values = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let val = u128::from_le_bytes(buffer[pos..pos + 16].try_into().unwrap());
+                        values.push(val);
+                        pos += 16;
+                    }
+                    self.insert_lane_batch(lane_idx, &values).await?;
+                }
                 _ => break,
             }
         }
