@@ -5,41 +5,43 @@ use std::path::PathBuf;
 
 /// `Orby` インスタンスを柔軟に構築するためのビルダーです。
 pub struct OrbyBuilder {
-    pub(crate) name: String,
-    pub(crate) capacity: usize,
-    pub(crate) dimension: usize,
+    pub(crate) ring_name: String,
+    pub(crate) ring_buffer_lane_item_count: usize,
+    pub(crate) ring_buffer_lane_count: usize,
     pub(crate) storage_mode: SaveMode,
     pub(crate) logic_mode: LogicMode,
+    pub(crate) compaction: bool,
     pub(crate) aof_enabled: bool,
     pub(crate) restore_path: Option<PathBuf>,
     pub(crate) capacity_usage_ratio: f64,
 }
 
 impl OrbyBuilder {
-    pub fn new(name: &str) -> Self {
+    pub fn new(ring_name: &str) -> Self {
         Self {
-            name: name.to_string(),
-            capacity: 10_000,
-            dimension: 2,
+            ring_name: ring_name.to_string(),
+            ring_buffer_lane_item_count: 10_000,
+            ring_buffer_lane_count: 2,
             storage_mode: SaveMode::MemoryOnly,
-            logic_mode: LogicMode::Ring,
+            logic_mode: LogicMode::RingBuffer,
+            compaction: false,
             aof_enabled: false,
             restore_path: None,
             capacity_usage_ratio: 0.8,
         }
     }
 
-    /// インデックスの最大収容行数を設定します。
-    /// DBの最大レコード数に相当します。
-    pub fn capacity(mut self, cap: usize) -> Self {
-        self.capacity = cap;
+    /// RingBufferのLane数を設定します。
+    /// DBのレコードのフィールド数のような概念です
+    pub fn ring_buffer_lane_count(mut self, count: usize) -> Self {
+        self.ring_buffer_lane_count = count;
         self
     }
 
-    /// 1行あたりのデータ要素数（カラム数）を設定します。
-    /// DBのレコードのフィールド数に相当します。
-    pub fn dimension(mut self, dim: usize) -> Self {
-        self.dimension = dim;
+    /// RingBufferのLaneに載せるアイテムの最大数を設定します。
+    /// DBのレコードのような概念ですが1次元のデータリストです
+    pub fn ring_buffer_lane_item_count(mut self, slots: usize) -> Self {
+        self.ring_buffer_lane_item_count = slots;
         self
     }
 
@@ -53,9 +55,17 @@ impl OrbyBuilder {
     }
 
     /// Orby の物理モードを設定します。
-    /// LogicMode::Ring: 時系列ログ用（古いデータを自動上書き）
+    /// LogicMode::RingBuffer: 時系列ログ用（古いデータを自動上書き）
     pub fn logic_mode(mut self, mode: LogicMode) -> Self {
         self.logic_mode = mode;
+        self
+    }
+
+    /// 削除時のコンパクション（詰め）動作を設定します。
+    /// true: 削除時にデータをスライドして詰める (Packed Mode)
+    /// false: 削除箇所をゼロ埋めするだけ (Sparse Mode / Ring)
+    pub fn compaction(mut self, enabled: bool) -> Self {
+        self.compaction = enabled;
         self
     }
 
@@ -79,13 +89,13 @@ impl OrbyBuilder {
     }
 
     pub async fn build(self) -> Result<Orby, OrbyError> {
-        let is_memory_mode = matches!(self.storage_mode, SaveMode::MemoryOnly);
         let engine = Orby::try_new(
-            &self.name,
-            self.capacity,
-            self.dimension,
-            self.storage_mode,
+            &self.ring_name,
+            self.ring_buffer_lane_item_count,
+            self.ring_buffer_lane_count,
+            self.storage_mode.clone(),
             self.logic_mode,
+            self.compaction,
             self.aof_enabled,
             self.capacity_usage_ratio,
         )
@@ -94,7 +104,7 @@ impl OrbyBuilder {
         if let Some(path) = self.restore_path {
             if !path.exists() {
                 return Err(OrbyError::IoError(format!(
-                    "Restore file not found at: {:?}",
+                    "Restore path not found at: {:?}",
                     path
                 )));
             }
@@ -112,18 +122,32 @@ impl OrbyBuilder {
                 "orby" => {
                     engine.restore_from_storage(path).await?;
                 }
+                _ if path.is_dir() => {
+                    // Assume Vault directory
+                    engine.restore_from_vault().await?;
+                }
                 _ => {
                     return Err(OrbyError::IoError(format!(
-                        "Unsupported restore file extension: '.{}'. Expected '.orby' or '.aof'",
-                        extension
+                        "Unsupported restore format at: {:?}",
+                        path
                     )));
                 }
             }
         } else {
-            // リストアが指定されていない場合、クリーンな空のプールとして初期化
-            // (メモリモード以外の場合はストレージファイルを準備)
-            if !is_memory_mode {
-                engine.init_storage_file().await?;
+            // リストアが指定されていない場合
+            match self.storage_mode {
+                SaveMode::Vault(_) => {
+                    // Vaultディレクトリが存在し、かつデータがある場合は自動ロードを試みる？
+                    // ユーザー要件的には init_vault で空ファイルを作るか、既存があればロード。
+                    // ここでは「クリーンな空のプール」として初期化するなら init_vault。
+                    // 物理ファイルがある場合にエラーにするかロードするかはポリシー次第。
+                    // init_vault は truncate(true) なので、新規作成。
+                    engine.init_vault().await?;
+                }
+                SaveMode::MemoryOnly => {}
+                _ => {
+                    engine.init_storage_file().await?;
+                }
             }
         }
 
@@ -139,8 +163,9 @@ mod tests {
     async fn test_builder() {
         let label = "test_builder";
         let engine = Orby::builder(label)
-            .capacity(20)
-            .dimension(3)
+            .ring_buffer_lane_item_count(10)
+            .ring_buffer_lane_count(3)
+            .compaction(true)
             .build()
             .await
             .unwrap();

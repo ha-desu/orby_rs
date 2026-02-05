@@ -10,9 +10,9 @@ pub enum OrbyError {
         available_mb: u64,
     },
 
-    /// 次元不一致
-    #[error("Orby: Data dimension mismatch in pool '{pool_name}': expected {expected}, but received {found}.")]
-    DimensionMismatch {
+    /// レーン数不一致
+    #[error("Orby: Lane count mismatch in pool '{pool_name}': expected {expected}, but received {found}.")]
+    LaneCountMismatch {
         pool_name: String,
         expected: usize,
         found: usize,

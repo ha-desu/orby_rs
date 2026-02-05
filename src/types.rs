@@ -5,10 +5,10 @@ use std::path::PathBuf;
 pub enum SaveMode {
     /// In-memory only. No persistence.
     MemoryOnly,
-    /// In-memory with full synchronization to a physical file. (Formerly Mirror)
-    Sync(Option<PathBuf>),
     /// Disk-based access. Data is not loaded into memory buffer. (Formerly StorageOnly)
     Direct(Option<PathBuf>),
+    /// マルチレーンの特殊ストレージ (並列アレイの永続性)。
+    Vault(Option<PathBuf>),
 }
 
 pub const HEADER_SIZE: u64 = 4096;
@@ -17,20 +17,19 @@ pub const STORAGE_MAGIC_V1: &[u8; 16] = b"ORBY_DATA_V1_LE ";
 /// Orby の物理的な挙動（データ管理戦略）を定義します。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LogicMode {
-    /// リングバッファモード：古いデータを自動的に上書きします。時系列ログやタイムライン向け。
-    Ring,
+    RingBuffer,
 }
 
 impl LogicMode {
     pub fn as_u8(&self) -> u8 {
         match self {
-            LogicMode::Ring => 0,
+            LogicMode::RingBuffer => 0,
         }
     }
 
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(LogicMode::Ring),
+            0 => Some(LogicMode::RingBuffer),
             _ => None,
         }
     }

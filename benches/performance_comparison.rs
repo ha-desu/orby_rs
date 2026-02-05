@@ -11,9 +11,7 @@ struct CleanupGuard;
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
         let files = [
-            "db_data/bench_sync_ring.orby",
             "db_data/bench_direct_ring.orby",
-            "db_data/bench_sync_ring.aof",
             "db_data/bench_direct_ring.aof",
         ];
         for f in files {
@@ -22,7 +20,7 @@ impl Drop for CleanupGuard {
     }
 }
 
-// Generate dummy data
+/// Generate dummy data
 fn generate_dummy_data(
     user_count: usize,
     posts_per_user: usize,
@@ -87,30 +85,16 @@ fn bench_comparison(c: &mut Criterion) {
     let following_ids: HashSet<u128> = users.iter().take(following_count).cloned().collect();
 
     // Prepare paths
-    let sync_ring_path = PathBuf::from("db_data/bench_sync_ring.orby");
     let direct_ring_path = PathBuf::from("db_data/bench_direct_ring.orby");
 
-    // Setup Ring Engines
+    // Setup RingBuffer Engines
     let engine_mem_ring = rt.block_on(async {
         let obs = Orby::new(
             "ring_mem",
             total_records,
             dimension,
             SaveMode::MemoryOnly,
-            LogicMode::Ring,
-        )
-        .await
-        .unwrap();
-        obs.insert_batch(&data).await.unwrap();
-        obs
-    });
-    let engine_sync_ring = rt.block_on(async {
-        let obs = Orby::new(
-            "ring_sync",
-            total_records,
-            dimension,
-            SaveMode::Sync(Some(sync_ring_path.clone())),
-            LogicMode::Ring,
+            LogicMode::RingBuffer,
         )
         .await
         .unwrap();
@@ -123,7 +107,7 @@ fn bench_comparison(c: &mut Criterion) {
             total_records,
             dimension,
             SaveMode::Direct(Some(direct_ring_path.clone())),
-            LogicMode::Ring,
+            LogicMode::RingBuffer,
         )
         .await
         .unwrap();
@@ -149,22 +133,15 @@ fn bench_comparison(c: &mut Criterion) {
         })
     });
 
-    // Ring Logic
-    group.bench_function("02_Orby_Ring_MemoryOnly", |b| {
+    // RingBuffer Logic
+    group.bench_function("02_Orby_RingBuffer_MemoryOnly", |b| {
         b.iter(|| {
             let res =
                 engine_mem_ring.query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
             black_box(res);
         })
     });
-    group.bench_function("03_Orby_Ring_Sync", |b| {
-        b.iter(|| {
-            let res =
-                engine_sync_ring.query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
-            black_box(res);
-        })
-    });
-    group.bench_function("04_Orby_Ring_Direct", |b| {
+    group.bench_function("04_Orby_RingBuffer_Direct", |b| {
         b.iter(|| {
             let res = engine_direct_ring
                 .query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
