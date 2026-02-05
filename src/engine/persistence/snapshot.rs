@@ -2,7 +2,7 @@ use crate::engine::Orby;
 use crate::error::OrbyError;
 use crate::types::{PulseCell, STORAGE_MAGIC_V1};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 
 impl Orby {
@@ -22,34 +22,50 @@ impl Orby {
         }
 
         let l_cap = u64::from_le_bytes(header[16..24].try_into().unwrap()) as usize;
-        let l_dim = u32::from_le_bytes(header[24..28].try_into().unwrap()) as usize;
-        let l_pdim = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
-        let l_len = u64::from_le_bytes(header[40..48].try_into().unwrap()) as usize;
-        let l_head = u64::from_le_bytes(header[48..56].try_into().unwrap()) as usize;
+        let l_len = u64::from_le_bytes(header[24..32].try_into().unwrap()) as usize;
+        let l_cursor = u64::from_le_bytes(header[32..40].try_into().unwrap()) as usize;
+        let l_dim = u32::from_le_bytes(header[40..44].try_into().unwrap()) as usize;
+        let _l_pdim = u32::from_le_bytes(header[44..48].try_into().unwrap()) as usize;
+        let l_logic_u8 = header[48];
 
         {
             let mut store = self.inner.write();
-            if l_cap != store.capacity || l_dim != store.dimension || l_pdim != store.stride {
-                return Err(OrbyError::DimensionMismatch {
+            let l_logic = crate::types::LogicMode::from_u8(l_logic_u8)
+                .ok_or_else(|| OrbyError::IoError("Invalid logic mode in file".into()))?;
+
+            if l_cap != store.capacity || l_dim != store.ring_buffer_lane_count {
+                return Err(OrbyError::LaneCountMismatch {
                     pool_name: store.name.clone(),
-                    expected: store.dimension,
+                    expected: store.ring_buffer_lane_count,
                     found: l_dim,
                 });
             }
 
-            store.len = l_len;
-            store.head = l_head;
+            if l_logic != store.logic_mode {
+                return Err(OrbyError::IoError("Logic mode mismatch".into()));
+            }
 
-            if !store.buffer.is_empty() {
-                let data_size = store.capacity * store.stride * 16;
+            store.len = l_len;
+            store.cursor = l_cursor;
+
+            if !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty() {
+                // ファイルはAoS形式、メモリはSoA形式
+                // load stride がある場合、それに従うべきだが、今回はデータサイズ計算を dim * 16 とする（密）
+                // もし互換性を厳密にするなら l_pdim を使うべき。
+                let data_size = (store.capacity * l_dim * 16) as usize;
                 let mut data_buf = vec![0u8; data_size];
                 file.read_exact(&mut data_buf)
                     .await
                     .map_err(|e| OrbyError::IoError(e.to_string()))?;
 
+                // data_buf is [row0_col0, row0_col1, ..., row1_col0, ...]
+                // We need to distribute to lanes[col].buffer[row]
+                let dim = store.ring_buffer_lane_count;
                 for (i, chunk) in data_buf.chunks_exact(16).enumerate() {
+                    let row_idx = i / dim;
+                    let col_idx = i % dim;
                     let val = u128::from_le_bytes(chunk.try_into().unwrap());
-                    store.buffer[i] = PulseCell::new(val);
+                    store.lanes[col_idx].buffer[row_idx] = PulseCell::new(val);
                 }
             }
         }
@@ -59,13 +75,12 @@ impl Orby {
 
     /// ストレージファイルを新規作成または初期化し、ヘッダーを書き込みます。
     pub(crate) async fn init_storage_file(&self) -> Result<(), OrbyError> {
-        let (path_opt, cap, dim, stride, logic) = {
+        let (path_opt, cap, dim, logic) = {
             let store = self.inner.read();
             (
                 store.mirror_path.clone(),
                 store.capacity,
-                store.dimension,
-                store.stride,
+                store.ring_buffer_lane_count,
                 store.logic_mode,
             )
         };
@@ -80,7 +95,8 @@ impl Orby {
                 .await
                 .map_err(|e| OrbyError::IoError(format!("Failed to create storage file: {}", e)))?;
 
-            let data_size = (cap * stride * 16) as u64;
+            // strideなし、dim * 16
+            let data_size = (cap * dim * 16) as u64;
             file.set_len(crate::types::HEADER_SIZE + data_size)
                 .await
                 .map_err(|e| OrbyError::IoError(e.to_string()))?;
@@ -88,9 +104,11 @@ impl Orby {
             let mut header = vec![0u8; crate::types::HEADER_SIZE as usize];
             header[0..16].copy_from_slice(STORAGE_MAGIC_V1);
             header[16..24].copy_from_slice(&(cap as u64).to_le_bytes());
-            header[24..28].copy_from_slice(&(dim as u32).to_le_bytes());
-            header[28..32].copy_from_slice(&(stride as u32).to_le_bytes());
-            header[32] = logic.as_u8();
+            header[24..32].copy_from_slice(&(0u64).to_le_bytes()); // len
+            header[32..40].copy_from_slice(&(0u64).to_le_bytes()); // cursor
+            header[40..44].copy_from_slice(&(dim as u32).to_le_bytes());
+            header[44..48].copy_from_slice(&(dim as u32).to_le_bytes()); // stride = ring_buffer_lane_count
+            header[48] = logic.as_u8();
 
             file.write_all(&header)
                 .await
@@ -143,37 +161,56 @@ impl Orby {
     }
 
     /// 指定されたファイルパスに 4KB ヘッダー付きのスナップショットを保存します。
-    pub fn write_snapshot_to_file(&self, path: &Path) -> Result<(), String> {
-        let store = self.inner.read();
+    pub async fn write_snapshot_to_file(&self, path: PathBuf) -> Result<(), String> {
+        let (name, capacity, len, cursor, dim, logic) = {
+            let store = self.inner.read();
+            (
+                store.name.clone(),
+                store.capacity,
+                store.len,
+                store.cursor,
+                store.ring_buffer_lane_count,
+                store.logic_mode,
+            )
+        };
 
-        let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-        let mut writer = std::io::BufWriter::new(file);
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = this.inner.read();
+            let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+            let mut writer = std::io::BufWriter::new(file);
 
-        let mut header = vec![0u8; crate::types::HEADER_SIZE as usize];
-        header[0..16].copy_from_slice(STORAGE_MAGIC_V1);
-        header[16..24].copy_from_slice(&(store.capacity as u64).to_le_bytes());
-        header[24..28].copy_from_slice(&(store.dimension as u32).to_le_bytes());
-        header[28..32].copy_from_slice(&(store.stride as u32).to_le_bytes());
-        header[32] = store.logic_mode.as_u8();
-        header[40..48].copy_from_slice(&(store.len as u64).to_le_bytes());
-        header[48..56].copy_from_slice(&(store.head as u64).to_le_bytes());
+            let mut header = vec![0u8; crate::types::HEADER_SIZE as usize];
+            header[0..16].copy_from_slice(STORAGE_MAGIC_V1);
+            header[16..24].copy_from_slice(&(capacity as u64).to_le_bytes());
+            header[24..32].copy_from_slice(&(len as u64).to_le_bytes());
+            header[32..40].copy_from_slice(&(cursor as u64).to_le_bytes());
+            header[40..44].copy_from_slice(&(dim as u32).to_le_bytes());
+            header[44..48].copy_from_slice(&(dim as u32).to_le_bytes());
+            header[48] = logic.as_u8();
 
-        let name_bytes = store.name.as_bytes();
-        let name_len = name_bytes.len().min(64);
-        header[64..64 + name_len].copy_from_slice(&name_bytes[..name_len]);
+            let name_bytes = name.as_bytes();
+            let name_len = name_bytes.len().min(64);
+            header[64..64 + name_len].copy_from_slice(&name_bytes[..name_len]);
 
-        writer.write_all(&header).map_err(|e| e.to_string())?;
+            writer.write_all(&header).map_err(|e| e.to_string())?;
 
-        if !store.buffer.is_empty() {
-            for field in &store.buffer {
-                writer
-                    .write_all(&field.as_u128().to_le_bytes())
-                    .map_err(|e| e.to_string())?;
+            if !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty() {
+                for i in 0..capacity {
+                    for col in 0..dim {
+                        let val = store.lanes[col].buffer[i].as_u128();
+                        writer
+                            .write_all(&val.to_le_bytes())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
             }
-        }
 
-        writer.flush().map_err(|e| e.to_string())?;
-        writer.get_mut().sync_all().map_err(|e| e.to_string())?;
-        Ok(())
+            writer.flush().map_err(|e| e.to_string())?;
+            writer.get_mut().sync_all().map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 }

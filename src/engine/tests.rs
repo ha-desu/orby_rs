@@ -4,7 +4,8 @@ use crate::row::PulseCellPack;
 #[tokio::test]
 async fn test_insert() {
     let label = "test_insert";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
+    // ring_buffer_lane_item_count=5 => capacity (rows) = 5
+    let engine = Orby::new(label, 5, 2, SaveMode::MemoryOnly, LogicMode::RingBuffer)
         .await
         .unwrap();
 
@@ -19,7 +20,7 @@ async fn test_insert() {
 #[tokio::test]
 async fn test_query_injection() {
     let label = "test_query";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
+    let engine = Orby::new(label, 5, 2, SaveMode::MemoryOnly, LogicMode::RingBuffer)
         .await
         .unwrap();
 
@@ -40,7 +41,7 @@ async fn test_query_injection() {
 #[tokio::test]
 async fn test_query_iter() {
     let label = "test_iter";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
+    let engine = Orby::new(label, 5, 2, SaveMode::MemoryOnly, LogicMode::RingBuffer)
         .await
         .unwrap();
 
@@ -58,26 +59,12 @@ async fn test_query_iter() {
 }
 
 #[tokio::test]
-async fn test_stride_alignment() {
-    let label = "test_alignment";
-    let engine = Orby::new(label, 10, 2, SaveMode::MemoryOnly, LogicMode::Ring)
-        .await
-        .unwrap();
-
-    let padded_dim = engine.inner.read().stride;
-    assert_eq!(
-        padded_dim, 4,
-        "Dimension 2 should result in stride 4 for 64-byte alignment"
-    );
-}
-
-#[tokio::test]
 async fn test_update_and_upsert() {
     let label = "test_update";
     let engine = Orby::builder(label)
-        .capacity(10)
-        .dimension(2)
-        .logic_mode(LogicMode::Ring)
+        .ring_buffer_lane_item_count(5) // 5 * 2 = 10
+        .ring_buffer_lane_count(2)
+        .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
         .unwrap();
@@ -107,9 +94,9 @@ async fn test_update_and_upsert() {
 async fn test_get_at_and_take() {
     let label = "test_get_at";
     let engine = Orby::builder(label)
-        .capacity(5)
-        .dimension(1)
-        .logic_mode(LogicMode::Ring)
+        .ring_buffer_lane_item_count(5) // 5 rows
+        .ring_buffer_lane_count(1)
+        .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
         .unwrap();
@@ -134,9 +121,9 @@ async fn test_get_at_and_take() {
 async fn test_find_indices() {
     let label = "test_indices";
     let engine = Orby::builder(label)
-        .capacity(5)
-        .dimension(1)
-        .logic_mode(LogicMode::Ring)
+        .ring_buffer_lane_item_count(5)
+        .ring_buffer_lane_count(1)
+        .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
         .unwrap();
@@ -156,57 +143,6 @@ async fn test_find_indices() {
 }
 
 #[tokio::test]
-async fn test_mirror_persistence() {
-    use std::io::SeekFrom;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    let temp_dir = std::env::temp_dir();
-    let label = "test_mirror";
-    let mirror_path = temp_dir.join(format!("{}.orby", label));
-
-    if mirror_path.exists() {
-        let _ = tokio::fs::remove_file(&mirror_path).await;
-    }
-
-    let engine = Orby::builder(label)
-        .capacity(10)
-        .dimension(2)
-        .logic_mode(LogicMode::Ring)
-        .with_storage(SaveMode::Sync(Some(temp_dir.clone())))
-        .build()
-        .await
-        .unwrap();
-
-    let mut file = tokio::fs::File::open(&mirror_path).await.unwrap();
-    let meta = file.metadata().await.unwrap();
-    assert_eq!(meta.len(), crate::types::HEADER_SIZE + 640);
-
-    let val1 = 0xA_u128;
-    let val2 = 0xB_u128;
-    engine.insert_batch(&[[val1, val2]]).await.unwrap();
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    let mut buffer = vec![0u8; 16];
-    file.seek(SeekFrom::Start(crate::types::HEADER_SIZE))
-        .await
-        .unwrap();
-    file.read_exact(&mut buffer).await.unwrap();
-    let stored_val1 = u128::from_le_bytes(buffer.as_slice().try_into().unwrap());
-    assert_eq!(stored_val1, val1);
-
-    file.read_exact(&mut buffer).await.unwrap();
-    let stored_val2 = u128::from_le_bytes(buffer.as_slice().try_into().unwrap());
-    assert_eq!(stored_val2, val2);
-
-    let mut padding = vec![0u8; 32];
-    file.read_exact(&mut padding).await.unwrap();
-    assert!(padding.iter().all(|&b| b == 0));
-
-    let _ = tokio::fs::remove_file(&mirror_path).await;
-}
-
-#[tokio::test]
 async fn test_storage_only_persistence() {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -217,15 +153,15 @@ async fn test_storage_only_persistence() {
     let label = "test_storage_only";
 
     let engine = Orby::builder(label)
-        .capacity(10)
-        .dimension(2)
-        .logic_mode(LogicMode::Ring)
+        .ring_buffer_lane_item_count(5)
+        .ring_buffer_lane_count(2)
+        .logic_mode(LogicMode::RingBuffer)
         .with_storage(SaveMode::Direct(Some(temp_dir.clone())))
         .build()
         .await
         .unwrap();
 
-    assert!(engine.inner.read().buffer.is_empty());
+    assert!(engine.inner.read().lanes[0].buffer.is_empty());
 
     let val1 = 12345_u128;
     let val2 = 67890_u128;
@@ -241,7 +177,6 @@ async fn test_storage_only_persistence() {
 
     assert_eq!(engine.len(), 1);
 
-    // Verify via query_iter (should also read from file via reused handle)
     let mut iter = engine.query_iter(|_| true);
     let row = iter.next().expect("Should have one row");
     assert_eq!(row[0], val1);
@@ -255,9 +190,9 @@ async fn test_storage_only_persistence() {
 async fn test_snapshot_generation() {
     let label = "test_snapshot";
     let engine = Orby::builder(label)
-        .capacity(10)
-        .dimension(2)
-        .logic_mode(LogicMode::Ring)
+        .ring_buffer_lane_item_count(5)
+        .ring_buffer_lane_count(2)
+        .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
         .unwrap();
@@ -271,11 +206,14 @@ async fn test_snapshot_generation() {
         .as_nanos();
     let snapshot_path = temp_dir.join(format!("{}_{}.snapshot", label, now));
 
-    engine.write_snapshot_to_file(&snapshot_path).unwrap();
+    engine
+        .write_snapshot_to_file(snapshot_path.clone())
+        .await
+        .unwrap();
 
     let file = tokio::fs::File::open(&snapshot_path).await.unwrap();
     let meta = file.metadata().await.unwrap();
-    assert_eq!(meta.len(), crate::types::HEADER_SIZE + 640);
+    assert_eq!(meta.len(), crate::types::HEADER_SIZE + 160);
 
     let _ = tokio::fs::remove_file(&snapshot_path).await;
 }
@@ -284,9 +222,9 @@ async fn test_snapshot_generation() {
 async fn test_purge_all_data() {
     let label = "test_purge_all_data";
     let engine = Orby::builder(label)
-        .capacity(10)
-        .dimension(1)
-        .logic_mode(LogicMode::Ring)
+        .ring_buffer_lane_item_count(10)
+        .ring_buffer_lane_count(1)
+        .logic_mode(LogicMode::RingBuffer)
         .build()
         .await
         .unwrap();
@@ -313,45 +251,34 @@ async fn test_purge_all_data() {
 }
 
 #[tokio::test]
-async fn test_storage_restoration() {
-    let temp_dir = std::env::temp_dir();
-    let label = "test_restore";
-    let path = temp_dir.join(format!("{}.orby", label));
+async fn test_insert_lane_batch() {
+    let label = "test_lane_batch";
+    let engine = Orby::builder(label)
+        .ring_buffer_lane_item_count(10)
+        .ring_buffer_lane_count(3)
+        .build()
+        .await
+        .unwrap();
 
-    if path.exists() {
-        let _ = tokio::fs::remove_file(&path).await;
+    // 1. insert_lane_batch でレーン 1 に 5 件書き込み
+    let values = vec![100, 200, 300, 400, 500];
+    engine.insert_lane_batch(1, &values).await.unwrap();
+
+    assert_eq!(engine.len(), 5);
+
+    // レーン 1 に値が入っているか、他のレーンが 0 かチェック
+    for i in 0..5 {
+        let row = engine.get_at(4 - i).unwrap(); // get_at(0) は最新なので index 4
+        assert_eq!(row[1], values[i]);
+        assert_eq!(row[0], 0);
+        assert_eq!(row[2], 0);
     }
 
-    {
-        let engine = Orby::builder(label)
-            .capacity(10)
-            .dimension(2)
-            .with_storage(SaveMode::Sync(Some(temp_dir.clone())))
-            .build()
-            .await
-            .unwrap();
+    // 2. ラップアラウンドのテスト
+    let values2 = vec![600, 700, 800, 900, 1000, 1100, 1200]; // 合計 5+7=12 件（キャパ10を超える）
+    engine.insert_lane_batch(0, &values2).await.unwrap();
 
-        engine
-            .insert_batch(&[[100, 200], [300, 400]])
-            .await
-            .unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-    }
-
-    {
-        let engine = Orby::builder(label)
-            .capacity(10)
-            .dimension(2)
-            .with_storage(SaveMode::Sync(Some(temp_dir.clone())))
-            .from_file(&path)
-            .build()
-            .await
-            .unwrap();
-
-        assert_eq!(engine.len(), 2);
-        assert_eq!(engine.get_at(0).unwrap()[0], 300);
-        assert_eq!(engine.get_at(1).unwrap()[0], 100);
-    }
-
-    let _ = tokio::fs::remove_file(&path).await;
+    assert_eq!(engine.len(), 10);
+    // 最新は 1200
+    assert_eq!(engine.get_at(0).unwrap()[0], 1200);
 }

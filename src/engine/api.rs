@@ -14,27 +14,44 @@ impl Orby {
         I: IntoIterator<Item = T>,
         T: AsRef<[u128]>,
     {
-        let iter = items.into_iter();
-        let (lower, _) = iter.size_hint();
+        let raw_items: Vec<Vec<u128>> = items
+            .into_iter()
+            .map(|item| item.as_ref().to_vec())
+            .collect();
+        if raw_items.is_empty() {
+            return Ok(());
+        }
+
         let mut aof_data = Vec::new();
         let mut mirror_data = Vec::new();
 
-        let (aof_sender, mirror_sender) = {
+        let (aof_sender, mirror_sender, has_vault, start_idx) = {
             let mut store = self.inner.write();
-            let logic_mode = store.logic_mode;
-            let has_aof = store.aof_sender.is_some();
+            let mode = store.logic_mode;
+            let has_vault = store.vault_path.is_some();
+            let start_idx = store.cursor;
 
-            if has_aof {
-                aof_data.reserve(lower.max(1) * store.dimension * 16);
-            }
-
-            match logic_mode {
-                LogicMode::Ring => {
-                    ring::insert_batch(&mut store, iter, &mut aof_data, &mut mirror_data)?;
+            match mode {
+                LogicMode::RingBuffer => {
+                    ring::insert_batch(
+                        &mut store,
+                        raw_items.iter(),
+                        &mut aof_data,
+                        &mut mirror_data,
+                    )?;
                 }
             }
-            (store.aof_sender.clone(), store.mirror_sender.clone())
+            (
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                has_vault,
+                start_idx,
+            )
         };
+
+        if has_vault {
+            self.commit_vault_batch(start_idx, raw_items).await?;
+        }
 
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
@@ -57,16 +74,30 @@ impl Orby {
         let mut aof_data = Vec::with_capacity(items.len() * N * 16);
         let mut mirror_data = Vec::new();
 
-        let (aof_sender, mirror_sender) = {
+        // Convert to Vec<Vec<u128>> for Vault if needed
+        let (aof_sender, mirror_sender, has_vault, start_idx) = {
             let mut store = self.inner.write();
-            let logic_mode = store.logic_mode;
-            match logic_mode {
-                LogicMode::Ring => {
-                    ring::insert_fixed(&mut store, items, &mut aof_data, &mut mirror_data)?;
-                }
-            }
-            (store.aof_sender.clone(), store.mirror_sender.clone())
+            let has_vault = store.vault_path.is_some();
+            let start_idx = store.cursor;
+
+            ring::insert_fixed(&mut store, items.clone(), &mut aof_data, &mut mirror_data)?;
+
+            (
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                has_vault,
+                start_idx,
+            )
         };
+
+        if has_vault {
+            let raw_rows: Vec<Vec<u128>> = items
+                .iter()
+                .map(|pack| pack.values.iter().map(|pc| pc.as_u128()).collect())
+                .collect();
+            self.commit_vault_batch(start_idx, raw_rows).await?;
+        }
+
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
                 let _ = sender.send(aof_data).await;
@@ -87,12 +118,11 @@ impl Orby {
     {
         let store = self.inner.read();
         let logic_mode = store.logic_mode;
-        let head = store.head;
-        let stride = store.stride;
+        let cursor = store.cursor;
         let cap = store.capacity;
         let len = store.len;
 
-        let file = if store.buffer.is_empty() {
+        let file = if store.lanes.is_empty() || store.lanes[0].buffer.is_empty() {
             store
                 .mirror_path
                 .as_ref()
@@ -106,8 +136,7 @@ impl Orby {
             filter,
             current_idx: 0,
             logic_mode,
-            head,
-            stride,
+            cursor,
             cap,
             len,
             file,
@@ -121,7 +150,7 @@ impl Orby {
     {
         let store = self.inner.read();
         match store.logic_mode {
-            LogicMode::Ring => ring::query_raw(&store, filter, limit),
+            LogicMode::RingBuffer => ring::query_raw(&store, filter, limit),
         }
     }
 
@@ -175,7 +204,7 @@ impl Orby {
             let mut store = self.inner.write();
             let logic_mode = store.logic_mode;
             match logic_mode {
-                LogicMode::Ring => {
+                LogicMode::RingBuffer => {
                     ring::purge_by_id(&mut store, index, id, &mut aof_data, &mut mirror_data)
                 }
             }
@@ -202,7 +231,7 @@ impl Orby {
             let mut store = self.inner.write();
             let logic_mode = store.logic_mode;
             let found = match logic_mode {
-                LogicMode::Ring => ring::update_by_id(
+                LogicMode::RingBuffer => ring::update_by_id(
                     &mut store,
                     index,
                     id,
@@ -226,6 +255,59 @@ impl Orby {
         found
     }
 
+    /// 特定のレーン（次元）に対して、複数のパルスを一括で流し込みます。
+    /// 他のレーンは、整合性維持のため自動的にゼロクリアされます。
+    pub async fn insert_lane_batch(
+        &self,
+        lane_idx: usize,
+        values: &[u128],
+    ) -> Result<(), OrbyError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+
+        let mut aof_data = Vec::new();
+        let mut mirror_data = Vec::new();
+
+        let (aof_sender, mirror_sender, has_vault, start_idx) = {
+            let mut store = self.inner.write();
+            let start_idx = store.cursor;
+            let has_vault = store.vault_path.is_some();
+
+            ring::insert_lane_batch(
+                &mut store,
+                lane_idx,
+                values,
+                &mut aof_data,
+                &mut mirror_data,
+            )?;
+
+            (
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                has_vault,
+                start_idx,
+            )
+        };
+
+        if has_vault {
+            self.commit_vault_lane_batch(lane_idx, start_idx, values.to_vec())
+                .await?;
+        }
+
+        if let Some(sender) = aof_sender {
+            if !aof_data.is_empty() {
+                let _ = sender.send(aof_data).await;
+            }
+        }
+        if let Some(sender) = mirror_sender {
+            if !mirror_data.is_empty() {
+                let _ = sender.send(mirror_data).await;
+            }
+        }
+        Ok(())
+    }
+
     /// ID が存在すれば更新、なければ新規挿入します。
     pub async fn upsert(&self, index: usize, id: u128, data: &[u128]) -> Result<(), OrbyError> {
         let mut aof_data = Vec::new();
@@ -235,7 +317,7 @@ impl Orby {
             let mut store = self.inner.write();
             let logic_mode = store.logic_mode;
             match logic_mode {
-                LogicMode::Ring => {
+                LogicMode::RingBuffer => {
                     ring::upsert(&mut store, index, id, data, &mut aof_data, &mut mirror_data)?
                 }
             }
@@ -261,14 +343,14 @@ impl Orby {
     {
         let store = self.inner.read();
         match store.logic_mode {
-            LogicMode::Ring => ring::find_indices(&store, filter, limit),
+            LogicMode::RingBuffer => ring::find_indices(&store, filter, limit),
         }
     }
 
     pub fn get_at(&self, logical_index: usize) -> Option<Arc<[u128]>> {
         let store = self.inner.read();
         match store.logic_mode {
-            LogicMode::Ring => ring::get_at(&store, logical_index),
+            LogicMode::RingBuffer => ring::get_at(&store, logical_index),
         }
     }
 
@@ -290,7 +372,7 @@ impl Orby {
             let logic_mode = store.logic_mode;
 
             match logic_mode {
-                LogicMode::Ring => ring::truncate(
+                LogicMode::RingBuffer => ring::truncate(
                     &mut store,
                     rows.into_iter(),
                     &mut aof_data,
