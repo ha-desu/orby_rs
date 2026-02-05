@@ -53,8 +53,7 @@ impl OrbyBuilder {
 
     /// ストレージの保存モードを設定します。
     /// MemoryOnly: メモリのみ
-    /// Sync: メモリ + 物理ファイル同期
-    /// Direct: ストレージのみ（省メモリ）
+    /// Vault: マルチレーンの特殊永続化
     pub fn with_storage(mut self, mode: SaveMode) -> Self {
         self.storage_mode = mode;
         self
@@ -156,9 +155,6 @@ impl OrbyBuilder {
                     }
                 }
                 SaveMode::MemoryOnly => {}
-                _ => {
-                    engine.init_storage_file().await?;
-                }
             }
         }
 

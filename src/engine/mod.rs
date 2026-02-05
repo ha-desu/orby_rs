@@ -62,11 +62,7 @@ impl Orby {
         capacity_usage_ratio: f64,
     ) -> Result<Self, OrbyError> {
         let row_bytes = ring_buffer_lane_count * 16;
-        let required_bytes = if matches!(storage_mode, SaveMode::Direct(_)) {
-            0
-        } else {
-            capacity as u64 * row_bytes as u64
-        };
+        let required_bytes = capacity as u64 * row_bytes as u64;
 
         if required_bytes > 0 {
             let mut sys = System::new_all();
@@ -83,7 +79,7 @@ impl Orby {
         }
 
         let mut aof_sender = None;
-        let mut mirror_sender = None;
+        let mirror_sender = None;
         let mut mirror_path_buf = None;
         let mut vault_path_buf = None;
 
@@ -96,31 +92,6 @@ impl Orby {
                 let vault_dir = base_path.join(name);
                 vault_path_buf = Some(vault_dir);
                 (None, None)
-            }
-            SaveMode::Direct(opt_path) => {
-                let base_path = opt_path
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-                let (orby_p, aof_p) = if base_path.is_dir() {
-                    (
-                        base_path.join(format!("{}.orby", name)),
-                        base_path.join(format!("{}.aof", name)),
-                    )
-                } else {
-                    let aof = base_path.with_extension("aof");
-                    (base_path, aof)
-                };
-
-                // 親ディレクトリが存在しない場合は作成する
-                if let Some(parent) = orby_p.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                }
-
-                (Some(orby_p), Some(aof_p))
             }
             _ => (None, None),
         };
@@ -138,23 +109,10 @@ impl Orby {
             aof_sender = Some(tx);
         }
 
-        if matches!(storage_mode, SaveMode::Direct(_)) {
-            let path = mirror_path_buf.clone().unwrap();
-            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<(u64, Vec<u8>)>>(1024);
-            Self::spawn_mirror_worker(name.to_string(), path, rx);
-            mirror_sender = Some(tx);
-        }
-
         use crate::logic::OrbyRingBuffer;
-        let lanes = if matches!(storage_mode, SaveMode::Direct(_)) {
-            (0..ring_buffer_lane_count)
-                .map(|_| OrbyRingBuffer { buffer: Vec::new() })
-                .collect()
-        } else {
-            (0..ring_buffer_lane_count)
-                .map(|_| OrbyRingBuffer::new(capacity))
-                .collect()
-        };
+        let lanes = (0..ring_buffer_lane_count)
+            .map(|_| OrbyRingBuffer::new(capacity))
+            .collect();
 
         Ok(Self {
             inner: Arc::new(RwLock::new(OrbyRingBufferSilo {

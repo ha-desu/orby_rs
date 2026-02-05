@@ -5,8 +5,6 @@ use std::path::PathBuf;
 pub enum SaveMode {
     /// In-memory only. No persistence.
     MemoryOnly,
-    /// Disk-based access. Data is not loaded into memory buffer. (Formerly StorageOnly)
-    Direct(Option<PathBuf>),
     /// マルチレーンの特殊ストレージ (並列アレイの永続性)。
     Vault(Option<PathBuf>),
 }
