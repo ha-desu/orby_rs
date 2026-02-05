@@ -22,36 +22,31 @@ impl Orby {
             return Ok(());
         }
 
-        let mut aof_data = Vec::new();
-        let mut mirror_data = Vec::new();
-
-        let (aof_sender, mirror_sender, has_vault, start_idx) = {
+        let (aof_sender, mirror_sender, has_vault, start_idx, changes, lane_count) = {
             let mut store = self.inner.write();
             let mode = store.logic_mode;
             let has_vault = store.vault_path.is_some();
             let start_idx = store.cursor;
+            let lane_count = store.ring_buffer_lane_count;
 
-            match mode {
-                LogicMode::RingBuffer => {
-                    ring::insert_batch(
-                        &mut store,
-                        raw_items.iter(),
-                        &mut aof_data,
-                        &mut mirror_data,
-                    )?;
-                }
-            }
+            let changes = match mode {
+                LogicMode::RingBuffer => ring::insert_batch(&mut store, raw_items.iter())?,
+            };
             (
                 store.aof_sender.clone(),
                 store.mirror_sender.clone(),
                 has_vault,
                 start_idx,
+                changes,
+                lane_count,
             )
         };
 
         if has_vault {
             self.commit_vault_batch(start_idx, raw_items).await?;
         }
+
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
 
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
@@ -71,22 +66,22 @@ impl Orby {
         &self,
         items: Vec<PulseCellPack<N>>,
     ) -> Result<(), OrbyError> {
-        let mut aof_data = Vec::with_capacity(items.len() * N * 16);
-        let mut mirror_data = Vec::new();
-
         // Convert to Vec<Vec<u128>> for Vault if needed
-        let (aof_sender, mirror_sender, has_vault, start_idx) = {
+        let (aof_sender, mirror_sender, has_vault, start_idx, changes, lane_count) = {
             let mut store = self.inner.write();
             let has_vault = store.vault_path.is_some();
             let start_idx = store.cursor;
+            let lane_count = store.ring_buffer_lane_count;
 
-            ring::insert_fixed(&mut store, items.clone(), &mut aof_data, &mut mirror_data)?;
+            let changes = ring::insert_fixed(&mut store, items.clone())?;
 
             (
                 store.aof_sender.clone(),
                 store.mirror_sender.clone(),
                 has_vault,
                 start_idx,
+                changes,
+                lane_count,
             )
         };
 
@@ -97,6 +92,8 @@ impl Orby {
                 .collect();
             self.commit_vault_batch(start_idx, raw_rows).await?;
         }
+
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
 
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
@@ -197,19 +194,21 @@ impl Orby {
         if id == 0 {
             return;
         }
-        let mut aof_data = Vec::new();
-        let mut mirror_data = Vec::new();
-
-        let (aof_sender, mirror_sender) = {
+        let (aof_sender, mirror_sender, changes, lane_count) = {
             let mut store = self.inner.write();
+            let lane_count = store.ring_buffer_lane_count;
             let logic_mode = store.logic_mode;
-            match logic_mode {
-                LogicMode::RingBuffer => {
-                    ring::purge_by_id(&mut store, index, id, &mut aof_data, &mut mirror_data)
-                }
-            }
-            (store.aof_sender.clone(), store.mirror_sender.clone())
+            let changes = match logic_mode {
+                LogicMode::RingBuffer => ring::purge_by_id(&mut store, index, id),
+            };
+            (
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                changes,
+                lane_count,
+            )
         };
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
                 let _ = sender.send(aof_data).await;
@@ -224,24 +223,22 @@ impl Orby {
 
     /// 指定した ID を持つデータをその場で更新します。
     pub async fn update_by_id(&self, index: usize, id: u128, new_data: &[u128]) -> bool {
-        let mut aof_data = Vec::new();
-        let mut mirror_data = Vec::new();
-
-        let (found, aof_sender, mirror_sender) = {
+        let (found, aof_sender, mirror_sender, changes, lane_count) = {
             let mut store = self.inner.write();
+            let lane_count = store.ring_buffer_lane_count;
             let logic_mode = store.logic_mode;
-            let found = match logic_mode {
-                LogicMode::RingBuffer => ring::update_by_id(
-                    &mut store,
-                    index,
-                    id,
-                    new_data,
-                    &mut aof_data,
-                    &mut mirror_data,
-                ),
+            let (found, changes) = match logic_mode {
+                LogicMode::RingBuffer => ring::update_by_id(&mut store, index, id, new_data),
             };
-            (found, store.aof_sender.clone(), store.mirror_sender.clone())
+            (
+                found,
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                changes,
+                lane_count,
+            )
         };
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
                 let _ = sender.send(aof_data).await;
@@ -266,27 +263,21 @@ impl Orby {
             return Ok(());
         }
 
-        let mut aof_data = Vec::new();
-        let mut mirror_data = Vec::new();
-
-        let (aof_sender, mirror_sender, has_vault, start_idx) = {
+        let (aof_sender, mirror_sender, has_vault, start_idx, changes, lane_count) = {
             let mut store = self.inner.write();
             let start_idx = store.cursor;
             let has_vault = store.vault_path.is_some();
+            let lane_count = store.ring_buffer_lane_count;
 
-            ring::insert_lane_batch(
-                &mut store,
-                lane_idx,
-                values,
-                &mut aof_data,
-                &mut mirror_data,
-            )?;
+            let changes = ring::insert_lane_batch(&mut store, lane_idx, values)?;
 
             (
                 store.aof_sender.clone(),
                 store.mirror_sender.clone(),
                 has_vault,
                 start_idx,
+                changes,
+                lane_count,
             )
         };
 
@@ -295,6 +286,7 @@ impl Orby {
                 .await?;
         }
 
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
                 let _ = sender.send(aof_data).await;
@@ -310,19 +302,21 @@ impl Orby {
 
     /// ID が存在すれば更新、なければ新規挿入します。
     pub async fn upsert(&self, index: usize, id: u128, data: &[u128]) -> Result<(), OrbyError> {
-        let mut aof_data = Vec::new();
-        let mut mirror_data = Vec::new();
-
-        let (aof_sender, mirror_sender) = {
+        let (aof_sender, mirror_sender, changes, lane_count) = {
             let mut store = self.inner.write();
+            let lane_count = store.ring_buffer_lane_count;
             let logic_mode = store.logic_mode;
-            match logic_mode {
-                LogicMode::RingBuffer => {
-                    ring::upsert(&mut store, index, id, data, &mut aof_data, &mut mirror_data)?
-                }
-            }
-            (store.aof_sender.clone(), store.mirror_sender.clone())
+            let changes = match logic_mode {
+                LogicMode::RingBuffer => ring::upsert(&mut store, index, id, data)?,
+            };
+            (
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                changes,
+                lane_count,
+            )
         };
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {
                 let _ = sender.send(aof_data).await;
@@ -364,24 +358,24 @@ impl Orby {
     where
         T: AsRef<[u128]>,
     {
-        let mut aof_data = Vec::new();
-        let mut mirror_data = Vec::new();
-
-        let (aof_sender, mirror_sender) = {
+        let (aof_sender, mirror_sender, changes, lane_count) = {
             let mut store = self.inner.write();
+            let lane_count = store.ring_buffer_lane_count;
             let logic_mode = store.logic_mode;
 
-            match logic_mode {
-                LogicMode::RingBuffer => ring::truncate(
-                    &mut store,
-                    rows.into_iter(),
-                    &mut aof_data,
-                    &mut mirror_data,
-                )?,
-            }
+            let changes = match logic_mode {
+                LogicMode::RingBuffer => ring::truncate(&mut store, rows.into_iter())?,
+            };
 
-            (store.aof_sender.clone(), store.mirror_sender.clone())
+            (
+                store.aof_sender.clone(),
+                store.mirror_sender.clone(),
+                changes,
+                lane_count,
+            )
         };
+
+        let (aof_data, mirror_data) = changes.flatten(lane_count);
 
         if let Some(sender) = aof_sender {
             if !aof_data.is_empty() {

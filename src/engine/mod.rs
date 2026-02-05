@@ -191,12 +191,10 @@ impl Orby {
     pub async fn delete(&self, index: usize) -> bool {
         let (res, has_vault, compaction) = {
             let mut store = self.inner.write();
-            let (mut aof_data, mut mirror_data) = (Vec::new(), Vec::new());
-            let res =
-                crate::logic::ring::delete(&mut *store, index, &mut aof_data, &mut mirror_data);
+            let (res, changes) = crate::logic::ring::delete(&mut *store, index);
             let has_vault = store.vault_path.is_some();
             let compaction = store.compaction;
-            self.dispatch_persistence(&mut *store, aof_data, mirror_data);
+            self.dispatch_persistence(&mut *store, changes);
             (res, has_vault, compaction)
         };
 
@@ -216,9 +214,9 @@ impl Orby {
     fn dispatch_persistence(
         &self,
         store: &mut OrbyRingBufferSilo,
-        aof_data: Vec<u8>,
-        mirror_data: Vec<(u64, Vec<u8>)>,
+        changes: crate::logic::PersistenceChanges,
     ) {
+        let (aof_data, mirror_data) = changes.flatten(store.ring_buffer_lane_count);
         if let Some(sender) = &store.aof_sender {
             if !aof_data.is_empty() {
                 let _ = sender.try_send(aof_data);
