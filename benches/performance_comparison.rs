@@ -1,23 +1,13 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use orby::{LogicMode, Orby, SaveMode};
 use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
 use tokio::runtime::Runtime;
 
 /// 実行終了時（パニック含む）に一時ファイルを削除するためのガード
 struct CleanupGuard;
 
 impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        let files = [
-            "db_data/bench_direct_ring.orby",
-            "db_data/bench_direct_ring.aof",
-        ];
-        for f in files {
-            let _ = fs::remove_file(f);
-        }
-    }
+    fn drop(&mut self) {}
 }
 
 /// Generate dummy data
@@ -84,9 +74,6 @@ fn bench_comparison(c: &mut Criterion) {
     let (users, data) = generate_dummy_data(user_count, posts_per_user, dimension);
     let following_ids: HashSet<u128> = users.iter().take(following_count).cloned().collect();
 
-    // Prepare paths
-    let direct_ring_path = PathBuf::from("db_data/bench_direct_ring.orby");
-
     // Setup RingBuffer Engines
     let engine_mem_ring = rt.block_on(async {
         let obs = Orby::new(
@@ -94,19 +81,6 @@ fn bench_comparison(c: &mut Criterion) {
             total_records,
             dimension,
             SaveMode::MemoryOnly,
-            LogicMode::RingBuffer,
-        )
-        .await
-        .unwrap();
-        obs.insert_batch(&data).await.unwrap();
-        obs
-    });
-    let engine_direct_ring = rt.block_on(async {
-        let obs = Orby::new(
-            "ring_direct",
-            total_records,
-            dimension,
-            SaveMode::Direct(Some(direct_ring_path.clone())),
             LogicMode::RingBuffer,
         )
         .await
@@ -138,13 +112,6 @@ fn bench_comparison(c: &mut Criterion) {
         b.iter(|| {
             let res =
                 engine_mem_ring.query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
-            black_box(res);
-        })
-    });
-    group.bench_function("04_Orby_RingBuffer_Direct", |b| {
-        b.iter(|| {
-            let res = engine_direct_ring
-                .query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
             black_box(res);
         })
     });

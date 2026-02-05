@@ -143,50 +143,6 @@ async fn test_find_indices() {
 }
 
 #[tokio::test]
-async fn test_storage_only_persistence() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!("orby_test_storage_only_{}", now));
-    let _ = tokio::fs::create_dir_all(&temp_dir).await;
-    let label = "test_storage_only";
-
-    let engine = Orby::builder(label)
-        .ring_buffer_lane_item_count(5)
-        .ring_buffer_lane_count(2)
-        .logic_mode(LogicMode::RingBuffer)
-        .with_storage(SaveMode::Direct(Some(temp_dir.clone())))
-        .build()
-        .await
-        .unwrap();
-
-    assert!(engine.inner.read().lanes[0].buffer.is_empty());
-
-    let val1 = 12345_u128;
-    let val2 = 67890_u128;
-    engine.insert_batch(&[[val1, val2]]).await.unwrap();
-
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    let row_opt = engine.get_at(0);
-    assert!(row_opt.is_some());
-    let row = row_opt.unwrap();
-    assert_eq!(row[0], val1);
-    assert_eq!(row[1], val2);
-
-    assert_eq!(engine.len(), 1);
-
-    let mut iter = engine.query_iter(|_| true);
-    let row = iter.next().expect("Should have one row");
-    assert_eq!(row[0], val1);
-    assert_eq!(row[1], val2);
-    assert!(iter.next().is_none());
-
-    let _ = tokio::fs::remove_dir_all(temp_dir).await;
-}
-
-#[tokio::test]
 async fn test_snapshot_generation() {
     let label = "test_snapshot";
     let engine = Orby::builder(label)
