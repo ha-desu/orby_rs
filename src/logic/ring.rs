@@ -17,6 +17,7 @@ where
 {
     let mut changes = PersistenceChanges::new();
     let dim = store.ring_buffer_lane_count;
+
     let cap = store.capacity;
 
     // Convert items once to use in both memory update and event
@@ -43,8 +44,8 @@ where
         if has_mem {
             let cursor = store.cursor;
             let is_overwrite = store.lanes[0].buffer[cursor].as_u128() != 0;
-            for (col, &val) in row.iter().enumerate() {
-                store.lanes[col].buffer[cursor] = PulseCell::new(val);
+            for (lane, &val) in store.lanes.iter_mut().zip(row.iter()) {
+                lane.buffer[cursor] = PulseCell::new(val);
             }
             if !is_overwrite && store.len < cap {
                 store.len += 1;
@@ -102,8 +103,8 @@ pub fn insert_fixed<const N: usize>(
             let cursor = store.cursor;
             let is_overwrite = store.lanes[0].buffer[cursor].as_u128() != 0;
 
-            for (col, &val) in item.values.iter().enumerate() {
-                store.lanes[col].buffer[cursor] = val;
+            for (lane, &val) in store.lanes.iter_mut().zip(item.values.iter()) {
+                lane.buffer[cursor] = val;
             }
 
             if !is_overwrite && store.len < cap {
@@ -137,6 +138,7 @@ pub fn insert_lane_batch(
     values: &[u128],
 ) -> Result<PersistenceChanges, OrbyError> {
     let mut changes = PersistenceChanges::new();
+
     let dim = store.ring_buffer_lane_count;
     let cap = store.capacity;
     let count = values.len();
@@ -165,16 +167,25 @@ pub fn insert_lane_batch(
         {
             let buffer = &mut store.lanes[lane_idx].buffer;
             if start_cursor + count <= cap {
-                for i in 0..count {
-                    buffer[start_cursor + i] = PulseCell::new(values[i]);
+                for (slot, &val) in buffer[start_cursor..start_cursor + count]
+                    .iter_mut()
+                    .zip(values)
+                {
+                    *slot = PulseCell::new(val);
                 }
             } else {
                 let len_to_end = cap - start_cursor;
-                for i in 0..len_to_end {
-                    buffer[start_cursor + i] = PulseCell::new(values[i]);
+                for (slot, &val) in buffer[start_cursor..cap]
+                    .iter_mut()
+                    .zip(&values[..len_to_end])
+                {
+                    *slot = PulseCell::new(val);
                 }
-                for i in 0..(count - len_to_end) {
-                    buffer[i] = PulseCell::new(values[len_to_end + i]);
+                for (slot, &val) in buffer[..count - len_to_end]
+                    .iter_mut()
+                    .zip(&values[len_to_end..])
+                {
+                    *slot = PulseCell::new(val);
                 }
             }
         }
@@ -186,17 +197,11 @@ pub fn insert_lane_batch(
             }
             let buffer = &mut store.lanes[col].buffer;
             if start_cursor + count <= cap {
-                for i in 0..count {
-                    buffer[start_cursor + i] = PulseCell::new(0);
-                }
+                buffer[start_cursor..start_cursor + count].fill(PulseCell::new(0));
             } else {
                 let len_to_end = cap - start_cursor;
-                for i in 0..len_to_end {
-                    buffer[start_cursor + i] = PulseCell::new(0);
-                }
-                for i in 0..(count - len_to_end) {
-                    buffer[i] = PulseCell::new(0);
-                }
+                buffer[start_cursor..cap].fill(PulseCell::new(0));
+                buffer[..count - len_to_end].fill(PulseCell::new(0));
             }
         }
     }
@@ -228,6 +233,7 @@ where
     T: AsRef<[u128]>,
 {
     let mut changes = PersistenceChanges::new();
+
     let dim = store.ring_buffer_lane_count;
     let cap = store.capacity;
 
@@ -257,8 +263,8 @@ where
 
         if has_mem {
             let cursor = store.cursor;
-            for (col, &val) in slice.iter().enumerate() {
-                store.lanes[col].buffer[cursor] = PulseCell::new(val);
+            for (lane, &val) in store.lanes.iter_mut().zip(slice.iter()) {
+                lane.buffer[cursor] = PulseCell::new(val);
             }
             store.len += 1;
         } else {
@@ -358,8 +364,8 @@ pub fn update_by_id(
 
     for physical_idx in targets {
         // 垂直書き込み
-        for (col, lane) in store.lanes.iter_mut().enumerate() {
-            lane.buffer[physical_idx] = PulseCell::new(new_data[col]);
+        for (lane, &val) in store.lanes.iter_mut().zip(new_data.iter()) {
+            lane.buffer[physical_idx] = PulseCell::new(val);
         }
 
         changes.push(RingOperation::Update {
@@ -449,9 +455,8 @@ pub fn count_active(store: &OrbyRingBufferSilo) -> usize {
 
     let mut count = 0;
     // 第1レーン（プライマリ次元）を指標としてアクティブセルを走査
-    let lane0 = &store.lanes[0].buffer;
-    for i in 0..limit {
-        if lane0[i].as_u128() != 0 {
+    for cell in store.lanes[0].buffer.iter().take(limit) {
+        if cell.as_u128() != 0 {
             count += 1;
         }
     }
@@ -499,10 +504,11 @@ pub fn get_at(store: &OrbyRingBufferSilo, logical_index: usize) -> Option<Arc<[u
     }
 
     // SoA 構造から一括取得して Arc 配列にパッケージ化
-    let mut row_data = Vec::with_capacity(store.ring_buffer_lane_count);
-    for col in 0..store.ring_buffer_lane_count {
-        row_data.push(store.lanes[col].buffer[physical_idx].as_u128());
-    }
+    let row_data: Vec<u128> = store
+        .lanes
+        .iter()
+        .map(|lane| lane.buffer[physical_idx].as_u128())
+        .collect();
 
     Some(Arc::from(row_data))
 }
@@ -513,7 +519,6 @@ pub fn query_raw<F>(store: &OrbyRingBufferSilo, filter: F, limit: usize) -> Vec<
 where
     F: Fn(&[PulseCell]) -> bool + Sync + Send,
 {
-    let dim = store.ring_buffer_lane_count;
     let len = store.len;
     let cursor = store.cursor;
     let cap = store.capacity;
@@ -540,10 +545,7 @@ where
         .into_par_iter()
         .with_min_len(min_len)
         .filter(|&i| {
-            let mut row_cells = Vec::with_capacity(dim);
-            for col in 0..dim {
-                row_cells.push(store.lanes[col].buffer[i]);
-            }
+            let row_cells: Vec<PulseCell> = store.lanes.iter().map(|lane| lane.buffer[i]).collect();
             // 墓標（全次元ゼロ）はスキップ
             if row_cells.iter().all(|&v| v.as_u128() == 0) {
                 return false;
@@ -554,10 +556,11 @@ where
 
     let mut results = Vec::with_capacity(limit);
     for &i in matches.iter().take(limit) {
-        let mut row_vals = Vec::with_capacity(dim);
-        for col in 0..dim {
-            row_vals.push(store.lanes[col].buffer[i].as_u128());
-        }
+        let row_vals: Vec<u128> = store
+            .lanes
+            .iter()
+            .map(|lane| lane.buffer[i].as_u128())
+            .collect();
         results.push(Arc::from(row_vals));
     }
     results
@@ -568,7 +571,6 @@ pub fn find_indices<F>(store: &OrbyRingBufferSilo, filter: F, limit: usize) -> V
 where
     F: Fn(&[PulseCell]) -> bool + Sync + Send,
 {
-    let dim = store.ring_buffer_lane_count;
     let len = store.len;
     let cursor = store.cursor;
     let cap = store.capacity;
@@ -593,10 +595,11 @@ where
         .enumerate()
         .with_min_len(min_len)
         .filter_map(|(logical_idx, physical_idx)| {
-            let mut row_cells = Vec::with_capacity(dim);
-            for col in 0..dim {
-                row_cells.push(store.lanes[col].buffer[physical_idx]);
-            }
+            let row_cells: Vec<PulseCell> = store
+                .lanes
+                .iter()
+                .map(|lane| lane.buffer[physical_idx])
+                .collect();
 
             if row_cells.iter().all(|&v| v.as_u128() == 0) {
                 return None;
