@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 #[tokio::test]
 async fn test_auto_restore_from_vault() {
-    let test_dir = "test_data_auto_restore";
+    let temp_path = std::env::temp_dir().join("orby_test_auto_restore");
+    let test_dir = temp_path.to_str().unwrap();
     let name = "test_ring_v2";
     let _sub_dir = PathBuf::from(test_dir).join(name);
 
