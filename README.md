@@ -2,14 +2,14 @@
   <img src="https://github.com/user-attachments/assets/c3eec46e-f583-4084-9186-56d29d60fde3" width="128" alt="Orby Logo">
 </p>
 
-# Orby (Orbital Observer) v0.2.0 (Alpha) 🌌
+# Orby (Orbital Observer) v0.2.0 (Alpha) 
 
 🚨 **開発途中のアルファ版です。本番環境での利用は推奨しません。**
 
 Orby（オービィ）は、128bit 固定長データ（UUID v7/v8 等）の走査・検索に特化した、Parallel Arrays方式のインメモリ・インデックスエンジンです。
 
 
-## 🌌 The Concept
+## 🪐 The Concept
 Orbyのイメージは、マルチプラッタのHDDと物理的に一本のバーで繋がった磁気ヘッドです。
 ある次元のデータを探し当てた瞬間、他の次元の磁気ヘッドも同じ位置を指し示します。同期されたインデックスから100次元のデータでも1次元と同じ速度で引き抜けるはずです。
 それに準えて、Orbital Observer（オービタル・オブザーバー）略して、Orbyとして命名しました。
@@ -40,8 +40,8 @@ use orby::{Orby, SaveMode, LogicMode};
 
 // 1. エンジンの初期化 (1万レコード / 2次元)
 let orby = Orby::builder("my_pulse_orbit")
-    .capacity(10_000)
-    .dimension(2) // ring_buffer_lane_count
+    .ring_buffer_lane_item_count(10_000) //次元に保存できる最大数
+    .ring_buffer_lane_count(2) // 次元数
     // 永続化設定: Vaultモード (ディレクトリ指定)
     .with_storage(SaveMode::Vault(Some("./data".into())))
     .logic_mode(LogicMode::RingBuffer)
@@ -77,8 +77,8 @@ Orbyは設定（LogicMode, SaveMode, Compaction）の組み合わせで多様な
 
 ```rust
 let streamer = Orby::builder("streamer")
-    .capacity(1_000)
-    .compaction(true) // 削除時に詰める
+    .ring_buffer_lane_item_count(1_000) //次元に保存できる最大数
+    .compaction(true) // ータ削除時に空き番号を詰めない
     .build().await?;
 ```
 
@@ -89,8 +89,8 @@ let streamer = Orby::builder("streamer")
 
 ```rust
 let inventory = Orby::builder("inventory")
-    .capacity(100) // 最大スロット数
-    .compaction(false) // インデックスを固定
+    .ring_buffer_lane_item_count(100) // //次元に保存できる最大数
+    .compaction(false) // データ削除時に空き番号を詰めない
     .build().await?;
 ```
 
