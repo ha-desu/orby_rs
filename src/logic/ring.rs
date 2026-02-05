@@ -1,5 +1,5 @@
 use crate::error::OrbyError;
-use crate::logic::OrbyRingBufferSilo;
+use crate::logic::{OrbyRingBufferSilo, PersistenceChanges, RingOperation};
 use crate::row::PulseCellPack;
 use crate::types::PulseCell;
 use rayon::prelude::*;
@@ -10,85 +10,65 @@ use std::sync::Arc;
 pub fn insert_batch<T, I>(
     store: &mut OrbyRingBufferSilo,
     items: I,
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> Result<(), OrbyError>
+) -> Result<PersistenceChanges, OrbyError>
 where
     I: Iterator<Item = T>,
     T: AsRef<[u128]>,
 {
+    let mut changes = PersistenceChanges::new();
     let dim = store.ring_buffer_lane_count;
     let cap = store.capacity;
-    let has_aof = store.aof_sender.is_some();
-    let has_mirror = store.mirror_sender.is_some();
 
-    // メモリバッファが有効（非 StorageOnly）かチェック
+    // Convert items once to use in both memory update and event
+    let raw_rows: Vec<Vec<u128>> = items.map(|item| item.as_ref().to_vec()).collect();
+    if raw_rows.is_empty() {
+        return Ok(changes);
+    }
+
+    // 1. メモリバッファが有効（非 StorageOnly）かチェック
     let has_mem = !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty();
+    let start_cursor = store.cursor;
 
-    for item in items {
-        let slice = item.as_ref();
-
+    for row in &raw_rows {
         // 次元不一致チェック
-        if slice.len() != dim {
+        if row.len() != dim {
             return Err(OrbyError::LaneCountMismatch {
                 pool_name: store.name.clone(),
                 expected: dim,
-                found: slice.len(),
+                found: row.len(),
             });
-        }
-
-        // 1. AOF 用のログを生成
-        if has_aof {
-            aof_data.push(crate::logic::AOF_OP_INSERT);
-            for &val in slice {
-                aof_data.extend_from_slice(&val.to_le_bytes());
-            }
         }
 
         // 2. メモリへの書き込み (Parallel Arrays 構造)
         if has_mem {
             let cursor = store.cursor;
-
-            // 上書き判定：現在のカーソル位置が非ゼロなら、有効なレコードを周回して上書きしたとみなす
             let is_overwrite = store.lanes[0].buffer[cursor].as_u128() != 0;
-
-            for (col, &val) in slice.iter().enumerate() {
+            for (col, &val) in row.iter().enumerate() {
                 store.lanes[col].buffer[cursor] = PulseCell::new(val);
             }
-
-            // 実データ件数（len）の更新
             if !is_overwrite && store.len < cap {
                 store.len += 1;
             }
-        } else {
-            // ストレージのみモードの場合、簡易的な len カウント
-            if store.len < cap {
-                store.len += 1;
-            }
-        }
-
-        // 3. ミラー同期（AoS形式への変換を伴う物理オフセット計算）
-        if has_mirror {
-            let offset_bytes = crate::types::HEADER_SIZE + (store.cursor as u64 * dim as u64 * 16);
-            let mut row_bytes = Vec::with_capacity(dim * 16);
-            for &val in slice {
-                row_bytes.extend_from_slice(&val.to_le_bytes());
-            }
-            mirror_data.push((offset_bytes, row_bytes));
+        } else if store.len < cap {
+            store.len += 1;
         }
 
         // カーソルを進める（リングバッファ）
         store.cursor = (store.cursor + 1) % cap;
-
-        // ヘッダー情報の同期予約
-        if has_mirror {
-            let len_bytes = (store.len as u64).to_le_bytes().to_vec();
-            let cursor_bytes = (store.cursor as u64).to_le_bytes().to_vec();
-            mirror_data.push((24, len_bytes)); // header offset 24: len
-            mirror_data.push((32, cursor_bytes)); // header offset 32: cursor
-        }
     }
-    Ok(())
+
+    // イベントの記録
+    changes.push(RingOperation::Insert {
+        cursor: start_cursor,
+        row_count: raw_rows.len(),
+        data: raw_rows,
+    });
+    changes.push(RingOperation::HeaderUpdate {
+        len: store.len,
+        cursor: store.cursor,
+    });
+
+    Ok(changes)
 }
 
 /// 固定次元の `PulseCellPack` を使用した高速挿入ロジック。
@@ -96,9 +76,8 @@ where
 pub fn insert_fixed<const N: usize>(
     store: &mut OrbyRingBufferSilo,
     items: Vec<PulseCellPack<N>>,
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> Result<(), OrbyError> {
+) -> Result<PersistenceChanges, OrbyError> {
+    let mut changes = PersistenceChanges::new();
     let dim = store.ring_buffer_lane_count;
     if N != dim {
         return Err(OrbyError::LaneCountMismatch {
@@ -109,17 +88,15 @@ pub fn insert_fixed<const N: usize>(
     }
 
     let cap = store.capacity;
-    let has_aof = store.aof_sender.is_some();
-    let has_mirror = store.mirror_sender.is_some();
     let has_mem = !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty();
+    let start_cursor = store.cursor;
+    let row_count = items.len();
+
+    let mut raw_data = Vec::with_capacity(row_count);
 
     for item in items {
-        if has_aof {
-            aof_data.push(crate::logic::AOF_OP_INSERT);
-            for &val in &item.values {
-                aof_data.extend_from_slice(&val.as_u128().to_le_bytes());
-            }
-        }
+        let row: Vec<u128> = item.values.iter().map(|v| v.as_u128()).collect();
+        raw_data.push(row.clone());
 
         if has_mem {
             let cursor = store.cursor;
@@ -136,25 +113,20 @@ pub fn insert_fixed<const N: usize>(
             store.len += 1;
         }
 
-        if has_mirror {
-            let offset_bytes = crate::types::HEADER_SIZE + (store.cursor as u64 * dim as u64 * 16);
-            let mut row_bytes = Vec::with_capacity(dim * 16);
-            for &val in &item.values {
-                row_bytes.extend_from_slice(&val.as_u128().to_le_bytes());
-            }
-            mirror_data.push((offset_bytes, row_bytes));
-        }
-
         store.cursor = (store.cursor + 1) % cap;
-
-        if has_mirror {
-            let len_bytes = (store.len as u64).to_le_bytes().to_vec();
-            let cursor_bytes = (store.cursor as u64).to_le_bytes().to_vec();
-            mirror_data.push((24, len_bytes));
-            mirror_data.push((32, cursor_bytes));
-        }
     }
-    Ok(())
+
+    changes.push(RingOperation::Insert {
+        cursor: start_cursor,
+        row_count,
+        data: raw_data,
+    });
+    changes.push(RingOperation::HeaderUpdate {
+        len: store.len,
+        cursor: store.cursor,
+    });
+
+    Ok(changes)
 }
 
 /// 特定のレーン（次元）に対して、複数のパルスを一括で流し込みます。
@@ -163,9 +135,8 @@ pub fn insert_lane_batch(
     store: &mut OrbyRingBufferSilo,
     lane_idx: usize,
     values: &[u128],
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> Result<(), OrbyError> {
+) -> Result<PersistenceChanges, OrbyError> {
+    let mut changes = PersistenceChanges::new();
     let dim = store.ring_buffer_lane_count;
     let cap = store.capacity;
     let count = values.len();
@@ -185,21 +156,11 @@ pub fn insert_lane_batch(
         });
     }
 
-    // 1. AOF ログ記録
-    if store.aof_sender.is_some() {
-        aof_data.push(crate::logic::AOF_OP_LANE_BATCH);
-        aof_data.extend_from_slice(&(lane_idx as u32).to_le_bytes());
-        aof_data.extend_from_slice(&(count as u32).to_le_bytes());
-        for &v in values {
-            aof_data.extend_from_slice(&v.to_le_bytes());
-        }
-    }
+    let start_cursor = store.cursor;
 
-    // 2. メモリ更新 (SoA 構造なので、特定レーンの slice に一括コピー可能)
+    // 1. メモリ更新
     let has_mem = !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty();
     if has_mem {
-        let start_cursor = store.cursor;
-
         // ターゲットレーンの更新（ラップアラウンド考慮）
         {
             let buffer = &mut store.lanes[lane_idx].buffer;
@@ -218,7 +179,7 @@ pub fn insert_lane_batch(
             }
         }
 
-        // 他レーンのゼロクリア（垂直同期）
+        // 他レーンのゼロクリア
         for col in 0..dim {
             if col == lane_idx {
                 continue;
@@ -238,55 +199,39 @@ pub fn insert_lane_batch(
                 }
             }
         }
-
-        // len の更新
-        store.len = (store.len + count).min(cap);
-    } else {
-        store.len = (store.len + count).min(cap);
     }
 
-    // ミラー同期
-    if store.mirror_sender.is_some() {
-        for i in 0..count {
-            let physical_idx = (store.cursor + i) % cap;
-            let offset = crate::types::HEADER_SIZE + (physical_idx as u64 * dim as u64 * 16);
-            let mut row = vec![0u8; dim * 16];
-            row[lane_idx * 16..(lane_idx + 1) * 16].copy_from_slice(&values[i].to_le_bytes());
-            mirror_data.push((offset, row));
-        }
-        mirror_data.push((24, (store.len as u64).to_le_bytes().to_vec()));
-        let final_cursor = (store.cursor + count) % cap;
-        mirror_data.push((32, (final_cursor as u64).to_le_bytes().to_vec()));
-    }
-
-    // カーソル更新
+    store.len = (store.len + count).min(cap);
     store.cursor = (store.cursor + count) % cap;
 
-    Ok(())
+    // 2. イベント記録
+    changes.push(RingOperation::LaneBatch {
+        lane_idx,
+        start_cursor,
+        values: values.to_vec(),
+    });
+    changes.push(RingOperation::HeaderUpdate {
+        len: store.len,
+        cursor: store.cursor,
+    });
+
+    Ok(changes)
 }
 
 /// プールの状態を完全にリセットし、指定されたデータで再初期化します。
 pub fn truncate<T, I>(
     store: &mut OrbyRingBufferSilo,
     items: I,
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> Result<(), OrbyError>
+) -> Result<PersistenceChanges, OrbyError>
 where
     I: Iterator<Item = T>,
     T: AsRef<[u128]>,
 {
+    let mut changes = PersistenceChanges::new();
     let dim = store.ring_buffer_lane_count;
     let cap = store.capacity;
-    let has_aof = store.aof_sender.is_some();
-    let has_mirror = store.mirror_sender.is_some();
 
-    // 1. AOF への truncate 記録
-    if has_aof {
-        aof_data.push(crate::logic::AOF_OP_TRUNCATE);
-    }
-
-    // 2. メモリバッファをゼロクリア
+    // 1. メモリバッファをゼロクリア
     if !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty() {
         for lane in &mut store.lanes {
             lane.buffer.fill(PulseCell::new(0));
@@ -295,8 +240,9 @@ where
     store.len = 0;
     store.cursor = 0;
 
-    // 3. 新しいデータの挿入
+    // 2. 新しいデータの挿入
     let has_mem = !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty();
+    let mut new_rows = Vec::new();
 
     for item in items.take(cap) {
         let slice = item.as_ref();
@@ -307,6 +253,7 @@ where
                 found: slice.len(),
             });
         }
+        new_rows.push(slice.to_vec());
 
         if has_mem {
             let cursor = store.cursor;
@@ -321,48 +268,30 @@ where
         store.cursor = (store.cursor + 1) % cap;
     }
 
-    // 4. ミラー同期（全件書き換えに等しいためバルク送信）
-    if has_mirror {
-        if !store.lanes.is_empty() {
-            let mut all_data = Vec::with_capacity(cap * dim * 16);
-            for i in 0..cap {
-                for col in 0..dim {
-                    let val = store.lanes[col].buffer[i].as_u128();
-                    all_data.extend_from_slice(&val.to_le_bytes());
-                }
-            }
-            mirror_data.push((crate::types::HEADER_SIZE, all_data));
-        }
+    // 3. イベント記録
+    changes.push(RingOperation::Truncate { new_rows });
+    changes.push(RingOperation::HeaderUpdate {
+        len: store.len,
+        cursor: store.cursor,
+    });
 
-        let len_bytes = (store.len as u64).to_le_bytes().to_vec();
-        let cursor_bytes = (store.cursor as u64).to_le_bytes().to_vec();
-        mirror_data.push((24, len_bytes));
-        mirror_data.push((32, cursor_bytes));
-    }
-
-    Ok(())
+    Ok(changes)
 }
 
 /// 指定したインデックスのデータを削除します。
 /// `compaction: true` の場合、後続のデータを前方へシフトし、常に隙間のない状態を維持します。
-pub fn delete(
-    store: &mut OrbyRingBufferSilo,
-    index: usize,
-    _aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> bool {
+pub fn delete(store: &mut OrbyRingBufferSilo, index: usize) -> (bool, PersistenceChanges) {
+    let mut changes = PersistenceChanges::new();
     if index >= store.capacity {
-        return false;
+        return (false, changes);
     }
     let has_mem = !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty();
     if !has_mem {
-        // メモリバッファ未構築時は操作不能
-        return false;
+        return (false, changes);
     }
 
-    // 対象インデックスに有効なデータがあるか確認
     if store.lanes[0].buffer[index].as_u128() == 0 {
-        return false;
+        return (false, changes);
     }
 
     // 1. インデックス位置のゼロクリア
@@ -373,36 +302,28 @@ pub fn delete(
         store.len -= 1;
     }
 
-    let has_mirror = store.mirror_sender.is_some();
+    changes.push(RingOperation::Delete {
+        physical_index: index,
+    });
 
-    // 2. コンパクション（前方シフト）ロジック
+    // 2. コンパクション（前方シフト）
     if store.compaction {
         let cap = store.capacity;
-
-        // [index+1 .. cap] の範囲を [index .. cap-1] へ垂直コピー
         if index < cap - 1 {
             for lane in &mut store.lanes {
                 lane.buffer.copy_within(index + 1..cap, index);
-                // シフト後に残る末尾の重複データをゼロ埋め
                 lane.buffer[cap - 1] = PulseCell::new(0);
             }
         }
-        // コンパクション時は常に len の位置が書き込み位置（末尾）となる
         store.cursor = store.len;
-
-        // 【注意】Compaction ON の時の AOF/Mirror 同期は複雑なため、
-        // 物理レイヤー（Vault 等）への指示は Orby::delete メソッド側で補完されます。
     }
 
-    // ミラーヘッダーの更新
-    if has_mirror {
-        let len_bytes = (store.len as u64).to_le_bytes().to_vec();
-        let cursor_bytes = (store.cursor as u64).to_le_bytes().to_vec();
-        mirror_data.push((24, len_bytes));
-        mirror_data.push((32, cursor_bytes));
-    }
+    changes.push(RingOperation::HeaderUpdate {
+        len: store.len,
+        cursor: store.cursor,
+    });
 
-    true
+    (true, changes)
 }
 
 /// 指定した ID を持つ行を、メモリ上の物理位置を変えずに更新します。
@@ -411,21 +332,16 @@ pub fn update_by_id(
     index: usize,
     id: u128,
     new_data: &[u128],
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> bool {
+) -> (bool, PersistenceChanges) {
+    let mut changes = PersistenceChanges::new();
     if id == 0 || new_data.len() != store.ring_buffer_lane_count {
-        return false;
+        return (false, changes);
     }
     if index >= store.ring_buffer_lane_count {
-        return false;
+        return (false, changes);
     }
 
     let mut found_any = false;
-    let has_aof = store.aof_sender.is_some();
-    let has_mirror = store.mirror_sender.is_some();
-
-    // ID の所在を検索
     let mut targets = Vec::new();
     {
         let search_lane = &store.lanes[index];
@@ -437,39 +353,25 @@ pub fn update_by_id(
     }
 
     if targets.is_empty() {
-        return false;
+        return (false, changes);
     }
 
     for physical_idx in targets {
-        // AOF ログ記録
-        if has_aof && !found_any {
-            aof_data.push(crate::logic::AOF_OP_UPDATE);
-            aof_data.extend_from_slice(&(index as u32).to_le_bytes());
-            aof_data.extend_from_slice(&id.to_le_bytes());
-            for &v in new_data {
-                aof_data.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-
-        // 垂直書き込み（すべての次元の該当位置を一斉に書き換え）
+        // 垂直書き込み
         for (col, lane) in store.lanes.iter_mut().enumerate() {
             lane.buffer[physical_idx] = PulseCell::new(new_data[col]);
         }
 
-        // ミラー同期
-        if has_mirror {
-            let offset_bytes = crate::types::HEADER_SIZE
-                + (physical_idx as u64 * store.ring_buffer_lane_count as u64 * 16);
-            let mut row_bytes = Vec::with_capacity(new_data.len() * 16);
-            for &v in new_data {
-                row_bytes.extend_from_slice(&v.to_le_bytes());
-            }
-            mirror_data.push((offset_bytes, row_bytes));
-        }
+        changes.push(RingOperation::Update {
+            physical_index: physical_idx,
+            id,
+            new_data: new_data.to_vec(),
+            logical_column: index,
+        });
 
         found_any = true;
     }
-    found_any
+    (found_any, changes)
 }
 
 /// 指定した ID があれば更新、なければ挿入します。
@@ -478,35 +380,22 @@ pub fn upsert(
     index: usize,
     id: u128,
     data: &[u128],
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) -> Result<(), OrbyError> {
-    if !update_by_id(store, index, id, data, aof_data, mirror_data) {
-        insert_batch(store, std::iter::once(data), aof_data, mirror_data)?;
+) -> Result<PersistenceChanges, OrbyError> {
+    let (found, mut changes) = update_by_id(store, index, id, data);
+    if !found {
+        changes = insert_batch(store, std::iter::once(data))?;
     }
-    Ok(())
+    Ok(changes)
 }
 
 /// 特定のカラム値に一致するレコードを検索し、その場でゼロ埋め（削除）します。
-pub fn purge_by_id(
-    store: &mut OrbyRingBufferSilo,
-    index: usize,
-    id: u128,
-    aof_data: &mut Vec<u8>,
-    mirror_data: &mut Vec<(u64, Vec<u8>)>,
-) {
+pub fn purge_by_id(store: &mut OrbyRingBufferSilo, index: usize, id: u128) -> PersistenceChanges {
+    let mut changes = PersistenceChanges::new();
     if id == 0 || index >= store.ring_buffer_lane_count {
-        return;
-    }
-    if store.aof_sender.is_some() {
-        aof_data.push(crate::logic::AOF_OP_PURGE);
-        aof_data.extend_from_slice(&(index as u32).to_le_bytes());
-        aof_data.extend_from_slice(&id.to_le_bytes());
+        return changes;
     }
 
-    let has_mirror = store.mirror_sender.is_some();
     let cap = store.capacity;
-
     let mut targets = Vec::new();
     {
         let search_lane = &store.lanes[index];
@@ -517,8 +406,11 @@ pub fn purge_by_id(
         }
     }
 
-    for physical_idx in targets {
-        // レーンを垂直にゼロ埋め（この段階では詰め処理は行わない）
+    if targets.is_empty() {
+        return changes;
+    }
+
+    for &physical_idx in &targets {
         for lane in &mut store.lanes {
             lane.buffer[physical_idx] = PulseCell::new(0);
         }
@@ -526,18 +418,19 @@ pub fn purge_by_id(
         if store.len > 0 {
             store.len -= 1;
         }
-
-        if has_mirror {
-            let offset_bytes = crate::types::HEADER_SIZE
-                + (physical_idx as u64 * store.ring_buffer_lane_count as u64 * 16);
-            let zeros = vec![0u8; store.ring_buffer_lane_count * 16];
-            mirror_data.push((offset_bytes, zeros));
-
-            // ヘッダーの len 同期
-            let len_bytes = (store.len as u64).to_le_bytes().to_vec();
-            mirror_data.push((24, len_bytes));
-        }
     }
+
+    changes.push(RingOperation::Purge {
+        physical_indices: targets,
+        id,
+        logical_column: index,
+    });
+    changes.push(RingOperation::HeaderUpdate {
+        len: store.len,
+        cursor: store.cursor,
+    });
+
+    changes
 }
 
 /// 実際にメモリ配列を走査し、非ゼロのパルス数をカウントします。
