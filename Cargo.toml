@@ -1,6 +1,6 @@
 [package]
 name = "orby"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["ha-desu"]
 edition = "2021"
 description = "Orby: A in-memory index engine for fixed-length 128-bit data."
