@@ -1,9 +1,9 @@
 use crate::engine::iter::OrbyIterator;
 use crate::engine::Orby;
 use crate::error::OrbyError;
-use crate::logic::{fixed, ring};
-use crate::row::OrbyRow;
-use crate::types::{LogicMode, OrbitField};
+use crate::logic::ring;
+use crate::row::PulseCellPack;
+use crate::types::{LogicMode, PulseCell};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -32,9 +32,6 @@ impl Orby {
                 LogicMode::Ring => {
                     ring::insert_batch(&mut store, iter, &mut aof_data, &mut mirror_data)?;
                 }
-                LogicMode::Fixed => {
-                    fixed::insert_batch(&mut store, iter, &mut aof_data, &mut mirror_data)?;
-                }
             }
             (store.aof_sender.clone(), store.mirror_sender.clone())
         };
@@ -55,7 +52,7 @@ impl Orby {
     /// 固定次元の行構造体を使用した高速なバッチ挿入を提供します。
     pub async fn insert_fixed<const N: usize>(
         &self,
-        items: Vec<OrbyRow<N>>,
+        items: Vec<PulseCellPack<N>>,
     ) -> Result<(), OrbyError> {
         let mut aof_data = Vec::with_capacity(items.len() * N * 16);
         let mut mirror_data = Vec::new();
@@ -66,9 +63,6 @@ impl Orby {
             match logic_mode {
                 LogicMode::Ring => {
                     ring::insert_fixed(&mut store, items, &mut aof_data, &mut mirror_data)?;
-                }
-                LogicMode::Fixed => {
-                    fixed::insert_fixed(&mut store, items, &mut aof_data, &mut mirror_data)?;
                 }
             }
             (store.aof_sender.clone(), store.mirror_sender.clone())
@@ -89,12 +83,12 @@ impl Orby {
     /// 条件に一致するデータを一件ずつ取得するためのイテレータを生成します。
     pub fn query_iter<'a, F>(&'a self, filter: F) -> OrbyIterator<'a, F>
     where
-        F: Fn(&[OrbitField]) -> bool,
+        F: Fn(&[PulseCell]) -> bool,
     {
         let store = self.inner.read();
         let logic_mode = store.logic_mode;
         let head = store.head;
-        let padded_dim = store.padded_dimension;
+        let stride = store.stride;
         let cap = store.capacity;
         let len = store.len;
 
@@ -113,7 +107,7 @@ impl Orby {
             current_idx: 0,
             logic_mode,
             head,
-            padded_dim,
+            stride,
             cap,
             len,
             file,
@@ -123,12 +117,11 @@ impl Orby {
     /// カスタムフィルタ（クロージャ）を注入して並列スキャンを実行します。
     pub fn query_raw<F>(&self, filter: F, limit: usize) -> Vec<Arc<[u128]>>
     where
-        F: Fn(&[OrbitField]) -> bool + Sync + Send,
+        F: Fn(&[PulseCell]) -> bool + Sync + Send,
     {
         let store = self.inner.read();
         match store.logic_mode {
             LogicMode::Ring => ring::query_raw(&store, filter, limit),
-            LogicMode::Fixed => fixed::query_raw(&store, filter, limit),
         }
     }
 
@@ -185,9 +178,6 @@ impl Orby {
                 LogicMode::Ring => {
                     ring::purge_by_id(&mut store, index, id, &mut aof_data, &mut mirror_data)
                 }
-                LogicMode::Fixed => {
-                    fixed::purge_by_id(&mut store, index, id, &mut aof_data, &mut mirror_data)
-                }
             }
             (store.aof_sender.clone(), store.mirror_sender.clone())
         };
@@ -213,14 +203,6 @@ impl Orby {
             let logic_mode = store.logic_mode;
             let found = match logic_mode {
                 LogicMode::Ring => ring::update_by_id(
-                    &mut store,
-                    index,
-                    id,
-                    new_data,
-                    &mut aof_data,
-                    &mut mirror_data,
-                ),
-                LogicMode::Fixed => fixed::update_by_id(
                     &mut store,
                     index,
                     id,
@@ -256,9 +238,6 @@ impl Orby {
                 LogicMode::Ring => {
                     ring::upsert(&mut store, index, id, data, &mut aof_data, &mut mirror_data)?
                 }
-                LogicMode::Fixed => {
-                    fixed::upsert(&mut store, index, id, data, &mut aof_data, &mut mirror_data)?
-                }
             }
             (store.aof_sender.clone(), store.mirror_sender.clone())
         };
@@ -278,12 +257,11 @@ impl Orby {
     /// 条件に一致する論理インデックスの一覧を返します。
     pub fn find_indices<F>(&self, filter: F, limit: usize) -> Vec<usize>
     where
-        F: Fn(&[OrbitField]) -> bool + Sync + Send,
+        F: Fn(&[PulseCell]) -> bool + Sync + Send,
     {
         let store = self.inner.read();
         match store.logic_mode {
             LogicMode::Ring => ring::find_indices(&store, filter, limit),
-            LogicMode::Fixed => fixed::find_indices(&store, filter, limit),
         }
     }
 
@@ -291,7 +269,6 @@ impl Orby {
         let store = self.inner.read();
         match store.logic_mode {
             LogicMode::Ring => ring::get_at(&store, logical_index),
-            LogicMode::Fixed => fixed::get_at(&store, logical_index),
         }
     }
 
@@ -314,12 +291,6 @@ impl Orby {
 
             match logic_mode {
                 LogicMode::Ring => ring::truncate(
-                    &mut store,
-                    rows.into_iter(),
-                    &mut aof_data,
-                    &mut mirror_data,
-                )?,
-                LogicMode::Fixed => fixed::truncate(
                     &mut store,
                     rows.into_iter(),
                     &mut aof_data,

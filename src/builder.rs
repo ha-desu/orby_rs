@@ -54,7 +54,6 @@ impl OrbyBuilder {
 
     /// Orby の物理モードを設定します。
     /// LogicMode::Ring: 時系列ログ用（古いデータを自動上書き）
-    /// LogicMode::Fixed: 個体管理用（個体数制限あり、Swap-Remove削除）
     pub fn logic_mode(mut self, mode: LogicMode) -> Self {
         self.logic_mode = mode;
         self
