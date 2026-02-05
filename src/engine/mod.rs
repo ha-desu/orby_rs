@@ -10,7 +10,7 @@ mod tests;
 use crate::builder::OrbyBuilder;
 use crate::error::OrbyError;
 use crate::logic::OrbyStore;
-use crate::types::{LogicMode, OrbitField, SaveMode};
+use crate::types::{LogicMode, PulseCell, SaveMode};
 use parking_lot::RwLock;
 use std::sync::Arc;
 use sysinfo::System;
@@ -61,7 +61,7 @@ impl Orby {
         capacity_usage_ratio: f64,
     ) -> Result<Self, OrbyError> {
         let row_bytes = (dimension * 16 + 63) & !63;
-        let padded_dimension = row_bytes / 16;
+        let stride = row_bytes / 16;
 
         let required_bytes = if matches!(storage_mode, SaveMode::Direct(_)) {
             0
@@ -137,7 +137,7 @@ impl Orby {
         let buffer = if matches!(storage_mode, SaveMode::Direct(_)) {
             Vec::new()
         } else {
-            vec![OrbitField::new(0); capacity * padded_dimension]
+            vec![PulseCell::new(0); capacity * stride]
         };
 
         Ok(Self {
@@ -148,7 +148,7 @@ impl Orby {
                 len: 0,
                 capacity,
                 dimension,
-                padded_dimension,
+                stride,
                 logic_mode,
                 storage_mode,
                 aof_sender,

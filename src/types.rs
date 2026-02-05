@@ -19,36 +19,32 @@ pub const STORAGE_MAGIC_V1: &[u8; 16] = b"ORBY_DATA_V1_LE ";
 pub enum LogicMode {
     /// リングバッファモード：古いデータを自動的に上書きします。時系列ログやタイムライン向け。
     Ring,
-    /// 固定制限モード：最大キャパシティに達すると挿入がエラーになります。削除は Swap-Remove で行われます。モンスター管理などの個体数制限向け。
-    Fixed,
 }
 
 impl LogicMode {
     pub fn as_u8(&self) -> u8 {
         match self {
             LogicMode::Ring => 0,
-            LogicMode::Fixed => 1,
         }
     }
 
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(LogicMode::Ring),
-            1 => Some(LogicMode::Fixed),
             _ => None,
         }
     }
 }
 
-/// Orbyが扱う最小単位、128-bitのデータフィールド。
+/// PulseCell は Orby が扱う最小単位の 128-bit データフィールドです。
 /// メモリレイアウトは u128 と完全に同一(transparent)です。
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 #[repr(transparent)]
-pub struct OrbitField(u128); // 完全にプライベートにし、トレイト経由で操作
+pub struct PulseCell(u128); // 完全にプライベートにし、トレイト経由で操作
 
-impl OrbitField {
+impl PulseCell {
     #[inline]
     pub fn new(val: u128) -> Self {
         Self(val)
@@ -61,16 +57,16 @@ impl OrbitField {
 }
 
 // 変換トレイトの実装（これが汎用性の鍵！）
-impl From<u128> for OrbitField {
+impl From<u128> for PulseCell {
     #[inline]
     fn from(v: u128) -> Self {
         Self(v)
     }
 }
 
-impl From<OrbitField> for u128 {
+impl From<PulseCell> for u128 {
     #[inline]
-    fn from(b: OrbitField) -> Self {
+    fn from(b: PulseCell) -> Self {
         b.0
     }
 }

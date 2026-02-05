@@ -1,6 +1,6 @@
 use crate::engine::Orby;
 use crate::error::OrbyError;
-use crate::types::{OrbitField, STORAGE_MAGIC_V1};
+use crate::types::{PulseCell, STORAGE_MAGIC_V1};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
@@ -29,10 +29,7 @@ impl Orby {
 
         {
             let mut store = self.inner.write();
-            if l_cap != store.capacity
-                || l_dim != store.dimension
-                || l_pdim != store.padded_dimension
-            {
+            if l_cap != store.capacity || l_dim != store.dimension || l_pdim != store.stride {
                 return Err(OrbyError::DimensionMismatch {
                     pool_name: store.name.clone(),
                     expected: store.dimension,
@@ -44,7 +41,7 @@ impl Orby {
             store.head = l_head;
 
             if !store.buffer.is_empty() {
-                let data_size = store.capacity * store.padded_dimension * 16;
+                let data_size = store.capacity * store.stride * 16;
                 let mut data_buf = vec![0u8; data_size];
                 file.read_exact(&mut data_buf)
                     .await
@@ -52,7 +49,7 @@ impl Orby {
 
                 for (i, chunk) in data_buf.chunks_exact(16).enumerate() {
                     let val = u128::from_le_bytes(chunk.try_into().unwrap());
-                    store.buffer[i] = OrbitField::new(val);
+                    store.buffer[i] = PulseCell::new(val);
                 }
             }
         }
@@ -62,13 +59,13 @@ impl Orby {
 
     /// ストレージファイルを新規作成または初期化し、ヘッダーを書き込みます。
     pub(crate) async fn init_storage_file(&self) -> Result<(), OrbyError> {
-        let (path_opt, cap, dim, p_dim, logic) = {
+        let (path_opt, cap, dim, stride, logic) = {
             let store = self.inner.read();
             (
                 store.mirror_path.clone(),
                 store.capacity,
                 store.dimension,
-                store.padded_dimension,
+                store.stride,
                 store.logic_mode,
             )
         };
@@ -83,7 +80,7 @@ impl Orby {
                 .await
                 .map_err(|e| OrbyError::IoError(format!("Failed to create storage file: {}", e)))?;
 
-            let data_size = (cap * p_dim * 16) as u64;
+            let data_size = (cap * stride * 16) as u64;
             file.set_len(crate::types::HEADER_SIZE + data_size)
                 .await
                 .map_err(|e| OrbyError::IoError(e.to_string()))?;
@@ -92,7 +89,7 @@ impl Orby {
             header[0..16].copy_from_slice(STORAGE_MAGIC_V1);
             header[16..24].copy_from_slice(&(cap as u64).to_le_bytes());
             header[24..28].copy_from_slice(&(dim as u32).to_le_bytes());
-            header[28..32].copy_from_slice(&(p_dim as u32).to_le_bytes());
+            header[28..32].copy_from_slice(&(stride as u32).to_le_bytes());
             header[32] = logic.as_u8();
 
             file.write_all(&header)
@@ -156,7 +153,7 @@ impl Orby {
         header[0..16].copy_from_slice(STORAGE_MAGIC_V1);
         header[16..24].copy_from_slice(&(store.capacity as u64).to_le_bytes());
         header[24..28].copy_from_slice(&(store.dimension as u32).to_le_bytes());
-        header[28..32].copy_from_slice(&(store.padded_dimension as u32).to_le_bytes());
+        header[28..32].copy_from_slice(&(store.stride as u32).to_le_bytes());
         header[32] = store.logic_mode.as_u8();
         header[40..48].copy_from_slice(&(store.len as u64).to_le_bytes());
         header[48..56].copy_from_slice(&(store.head as u64).to_le_bytes());

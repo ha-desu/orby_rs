@@ -10,5 +10,5 @@ pub mod utils;
 pub use builder::OrbyBuilder;
 pub use engine::Orby;
 pub use error::OrbyError;
-pub use row::OrbyRow;
-pub use types::{LogicMode, OrbitField, SaveMode};
+pub use row::PulseCellPack;
+pub use types::{LogicMode, PulseCell, SaveMode};

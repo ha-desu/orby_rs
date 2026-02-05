@@ -1,5 +1,5 @@
 use crate::logic::OrbyStore;
-use crate::types::{LogicMode, OrbitField};
+use crate::types::{LogicMode, PulseCell};
 use parking_lot::RwLockReadGuard;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ pub struct OrbyIterator<'a, F> {
     pub(crate) current_idx: usize,
     pub(crate) logic_mode: LogicMode,
     pub(crate) head: usize,
-    pub(crate) padded_dim: usize,
+    pub(crate) stride: usize,
     pub(crate) cap: usize,
     pub(crate) len: usize,
     pub(crate) file: Option<std::fs::File>,
@@ -26,7 +26,7 @@ pub struct OrbyIterator<'a, F> {
 
 impl<'a, F> Iterator for OrbyIterator<'a, F>
 where
-    F: Fn(&[OrbitField]) -> bool,
+    F: Fn(&[PulseCell]) -> bool,
 {
     type Item = Arc<[u128]>;
 
@@ -37,7 +37,7 @@ where
             let i = self.current_idx;
             self.current_idx += 1;
 
-            let logical_idx = match self.logic_mode {
+            let physical_idx = match self.logic_mode {
                 LogicMode::Ring => {
                     if self.head > i {
                         self.head - 1 - i
@@ -45,12 +45,11 @@ where
                         self.cap + self.head - 1 - i
                     }
                 }
-                LogicMode::Fixed => self.len - 1 - i,
             };
 
-            let start = logical_idx * self.padded_dim;
+            let start = physical_idx * self.stride;
 
-            let row_data_vec: Vec<OrbitField> = if let Some(ref mut f) = self.file {
+            let row_data_vec: Vec<PulseCell> = if let Some(ref mut f) = self.file {
                 use std::io::{Read, Seek, SeekFrom};
                 let offset = crate::types::HEADER_SIZE + (start * 16) as u64;
                 if f.seek(SeekFrom::Start(offset)).is_err() {
@@ -61,7 +60,7 @@ where
                     break;
                 }
                 buf.chunks_exact(16)
-                    .map(|c| OrbitField::new(u128::from_le_bytes(c.try_into().unwrap())))
+                    .map(|c| PulseCell::new(u128::from_le_bytes(c.try_into().unwrap())))
                     .collect()
             } else {
                 self.store.buffer[start..start + dim].to_vec()
@@ -76,11 +75,7 @@ where
 
             if (self.filter)(row_data) {
                 return Some(Arc::from(
-                    row_data
-                        .iter()
-                        .map(|b| b.as_u128())
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
+                    row_data.iter().map(|b| b.as_u128()).collect::<Vec<_>>(),
                 ));
             }
         }

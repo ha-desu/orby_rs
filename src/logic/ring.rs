@@ -1,7 +1,7 @@
 use crate::error::OrbyError;
 use crate::logic::OrbyStore;
-use crate::row::OrbyRow;
-use crate::types::OrbitField;
+use crate::row::PulseCellPack;
+use crate::types::PulseCell;
 use crate::utils::cache::calculate_min_len;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ where
     T: AsRef<[u128]>,
 {
     let dim = store.dimension;
-    let padded_dim = store.padded_dimension;
+    let padded_dim = store.stride;
     let cap = store.capacity;
     let has_aof = store.aof_sender.is_some();
     let has_mirror = store.mirror_sender.is_some();
@@ -44,7 +44,7 @@ where
         let start = store.head * padded_dim;
         if !store.buffer.is_empty() {
             for (i, &val) in slice.iter().enumerate() {
-                store.buffer[start + i] = OrbitField::new(val);
+                store.buffer[start + i] = PulseCell::new(val);
             }
         }
 
@@ -63,7 +63,6 @@ where
         }
 
         if has_mirror {
-            // Sync Metadata (Head: 48, Len: 40)
             let len_bytes = (store.len as u64).to_le_bytes().to_vec();
             let head_bytes = (store.head as u64).to_le_bytes().to_vec();
             mirror_data.push((40, len_bytes));
@@ -75,12 +74,12 @@ where
 
 pub fn insert_fixed<const N: usize>(
     store: &mut OrbyStore,
-    items: Vec<OrbyRow<N>>,
+    items: Vec<PulseCellPack<N>>,
     aof_data: &mut Vec<u8>,
     mirror_data: &mut Vec<(u64, Vec<u8>)>,
 ) -> Result<(), OrbyError> {
     let dim = store.dimension;
-    let padded_dim = store.padded_dimension;
+    let padded_dim = store.stride;
     let cap = store.capacity;
     let has_aof = store.aof_sender.is_some();
     let has_mirror = store.mirror_sender.is_some();
@@ -143,7 +142,7 @@ where
     T: AsRef<[u128]>,
 {
     let dim = store.dimension;
-    let padded_dim = store.padded_dimension;
+    let padded_dim = store.stride;
     let cap = store.capacity;
     let has_aof = store.aof_sender.is_some();
     let has_mirror = store.mirror_sender.is_some();
@@ -155,7 +154,7 @@ where
 
     // 2. Memory Reset
     if !store.buffer.is_empty() {
-        store.buffer.fill(OrbitField::new(0));
+        store.buffer.fill(PulseCell::new(0));
     }
     store.len = 0;
     store.head = 0;
@@ -174,7 +173,7 @@ where
         let start = store.head * padded_dim;
         if !store.buffer.is_empty() {
             for (i, &val) in slice.iter().enumerate() {
-                store.buffer[start + i] = OrbitField::new(val);
+                store.buffer[start + i] = PulseCell::new(val);
             }
         }
 
@@ -193,7 +192,6 @@ where
             mirror_data.push((crate::types::HEADER_SIZE, all_data));
         }
 
-        // Sync Metadata
         let len_bytes = (store.len as u64).to_le_bytes().to_vec();
         let head_bytes = (store.head as u64).to_le_bytes().to_vec();
         mirror_data.push((40, len_bytes));
@@ -218,7 +216,7 @@ pub fn update_by_id(
     }
 
     let mut found_any = false;
-    let padded_dim = store.padded_dimension;
+    let padded_dim = store.stride;
     let has_aof = store.aof_sender.is_some();
     let has_mirror = store.mirror_sender.is_some();
 
@@ -236,11 +234,10 @@ pub fn update_by_id(
                 }
 
                 for (offset, &v) in new_data.iter().enumerate() {
-                    store.buffer[start + offset] = OrbitField::new(v);
+                    store.buffer[start + offset] = PulseCell::new(v);
                 }
 
                 if has_mirror {
-                    // Update entire row
                     let offset_bytes = crate::types::HEADER_SIZE + (start * 16) as u64;
                     let mut row_bytes = Vec::with_capacity(new_data.len() * 16);
                     for &v in new_data {
@@ -288,7 +285,7 @@ pub fn purge_by_id(
         aof_data.extend_from_slice(&id.to_le_bytes());
     }
 
-    let padded_dim = store.padded_dimension;
+    let padded_dim = store.stride;
     let len = store.len;
     let has_mirror = store.mirror_sender.is_some();
 
@@ -296,10 +293,9 @@ pub fn purge_by_id(
         let start = i * padded_dim;
         if let Some(val) = store.buffer.get(start + index) {
             if val.as_u128() == id {
-                store.buffer[start..start + padded_dim].fill(OrbitField::new(0));
+                store.buffer[start..start + store.dimension].fill(PulseCell::new(0));
 
                 if has_mirror {
-                    // Write zeros to file
                     let offset_bytes = crate::types::HEADER_SIZE + (start * 16) as u64;
                     let zeros = vec![0u8; padded_dim * 16];
                     mirror_data.push((offset_bytes, zeros));
@@ -327,22 +323,18 @@ pub fn get_at(store: &OrbyStore, logical_index: usize) -> Option<Arc<[u128]>> {
         if let Some(path) = &store.mirror_path {
             use std::io::{Read, Seek};
             let mut f = std::fs::File::open(path).ok()?;
-            let offset =
-                crate::types::HEADER_SIZE + (physical_idx * store.padded_dimension * 16) as u64;
+            let offset = crate::types::HEADER_SIZE + (physical_idx * store.stride * 16) as u64;
             if f.seek(std::io::SeekFrom::Start(offset)).is_err() {
                 return None;
             }
 
             let mut buf = vec![0u8; store.dimension * 16];
-            // We only read store.dimension items, but file has padded_dimension.
-            // They are contiguous at start of row.
             if f.read_exact(&mut buf).is_err() {
                 return None;
             }
 
             let mut data = Vec::with_capacity(store.dimension);
             for chunk in buf.chunks_exact(16) {
-                // Try into array
                 if let Ok(bytes) = chunk.try_into() {
                     data.push(u128::from_le_bytes(bytes));
                 }
@@ -352,7 +344,7 @@ pub fn get_at(store: &OrbyStore, logical_index: usize) -> Option<Arc<[u128]>> {
         return None;
     }
 
-    let start = physical_idx * store.padded_dimension;
+    let start = physical_idx * store.stride;
     let row_data = &store.buffer[start..start + store.dimension];
 
     Some(Arc::from(
@@ -362,10 +354,10 @@ pub fn get_at(store: &OrbyStore, logical_index: usize) -> Option<Arc<[u128]>> {
 
 pub fn query_raw<F>(store: &OrbyStore, filter: F, limit: usize) -> Vec<Arc<[u128]>>
 where
-    F: Fn(&[OrbitField]) -> bool + Sync + Send,
+    F: Fn(&[PulseCell]) -> bool + Sync + Send,
 {
     let dim = store.dimension;
-    let padded_dim = store.padded_dimension;
+    let stride = store.stride;
     let len = store.len;
     let head = store.head;
     let cap = store.capacity;
@@ -379,7 +371,6 @@ where
             };
             let mut results = Vec::new();
 
-            // Ring logic order: head-1..0 then cap-1..head
             let mut order = Vec::new();
             for i in (0..head).rev() {
                 order.push(i);
@@ -391,7 +382,7 @@ where
             }
 
             for i in order {
-                let offset = crate::types::HEADER_SIZE + (i * padded_dim * 16) as u64;
+                let offset = crate::types::HEADER_SIZE + (i * stride * 16) as u64;
                 if f.seek(SeekFrom::Start(offset)).is_err() {
                     break;
                 }
@@ -399,9 +390,9 @@ where
                 if f.read_exact(&mut buf).is_err() {
                     break;
                 }
-                let orbit_fields: Vec<OrbitField> = buf
+                let orbit_fields: Vec<PulseCell> = buf
                     .chunks_exact(16)
-                    .map(|c| OrbitField::new(u128::from_le_bytes(c.try_into().unwrap())))
+                    .map(|c| PulseCell::new(u128::from_le_bytes(c.try_into().unwrap())))
                     .collect();
 
                 if filter(&orbit_fields) {
@@ -421,43 +412,55 @@ where
         return Vec::new();
     }
 
-    let min_len = calculate_min_len(padded_dim);
+    let min_len = calculate_min_len(stride);
 
-    let (front, back) = store.buffer[..len * padded_dim].split_at(head * padded_dim);
-    let mut results: Vec<Arc<[u128]>> = front
-        .par_chunks_exact(padded_dim)
-        .rev()
-        .chain(back.par_chunks_exact(padded_dim).rev())
+    let mut results: Vec<Arc<[u128]>> = Vec::new();
+
+    // 巡回して最新順に取得
+    let mut order = Vec::new();
+    for i in (0..head).rev() {
+        order.push(i);
+    }
+    if len == cap {
+        for i in (head..cap).rev() {
+            order.push(i);
+        }
+    }
+
+    let matches: Vec<usize> = order
+        .into_par_iter()
         .with_min_len(min_len)
-        .filter_map(|row| {
-            let row_data = &row[..dim];
+        .filter(|&i| {
+            let start = i * stride;
+            let row_data = &store.buffer[start..start + dim];
             if row_data.iter().all(|&v| v.as_u128() == 0) {
-                return None;
+                return false;
             }
-
-            if filter(row_data) {
-                Some(Arc::from(
-                    row_data
-                        .iter()
-                        .map(|b| b.as_u128())
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ))
-            } else {
-                None
-            }
+            filter(row_data)
         })
         .collect();
-    results.truncate(limit);
+
+    for &i in matches.iter().take(limit) {
+        let start = i * stride;
+        let row_data = &store.buffer[start..start + dim];
+        results.push(Arc::from(
+            row_data
+                .iter()
+                .map(|b| b.as_u128())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        ));
+    }
+
     results
 }
 
 pub fn find_indices<F>(store: &OrbyStore, filter: F, limit: usize) -> Vec<usize>
 where
-    F: Fn(&[OrbitField]) -> bool + Sync + Send,
+    F: Fn(&[PulseCell]) -> bool + Sync + Send,
 {
     let dim = store.dimension;
-    let padded_dim = store.padded_dimension;
+    let stride = store.stride;
     let len = store.len;
     let head = store.head;
     let cap = store.capacity;
@@ -470,7 +473,6 @@ where
                 Err(_) => return Vec::new(),
             };
             let mut indices = Vec::new();
-            // Use same logic as query_raw results
             let mut order = Vec::new();
             for i in (0..head).rev() {
                 order.push(i);
@@ -482,7 +484,7 @@ where
             }
 
             for (logical_idx, physical_idx) in order.into_iter().enumerate() {
-                let offset = crate::types::HEADER_SIZE + (physical_idx * padded_dim * 16) as u64;
+                let offset = crate::types::HEADER_SIZE + (physical_idx * stride * 16) as u64;
                 if f.seek(SeekFrom::Start(offset)).is_err() {
                     break;
                 }
@@ -490,9 +492,9 @@ where
                 if f.read_exact(&mut buf).is_err() {
                     break;
                 }
-                let orbit_fields: Vec<OrbitField> = buf
+                let orbit_fields: Vec<PulseCell> = buf
                     .chunks_exact(16)
-                    .map(|c| OrbitField::new(u128::from_le_bytes(c.try_into().unwrap())))
+                    .map(|c| PulseCell::new(u128::from_le_bytes(c.try_into().unwrap())))
                     .collect();
 
                 if filter(&orbit_fields) {
@@ -507,30 +509,30 @@ where
         return Vec::new();
     }
 
-    let min_len = calculate_min_len(padded_dim);
+    let min_len = calculate_min_len(stride);
 
-    // 有効な物理領域全体を並列スキャン
-    // 注意: リングバッファでは物理順序 != 論理順序 なので、
-    // ここで得られる結果は「論理順序（最新順）」にはなりません。
-    // 後でソートする必要があります。
+    let mut order = Vec::new();
+    for i in (0..head).rev() {
+        order.push(i);
+    }
+    if len == cap {
+        for i in (head..cap).rev() {
+            order.push(i);
+        }
+    }
 
-    let mut indices: Vec<usize> = store.buffer[..len * padded_dim]
-        .par_chunks_exact(padded_dim)
-        .enumerate() // 物理インデックス
+    let mut indices: Vec<usize> = order
+        .into_par_iter()
+        .enumerate()
         .with_min_len(min_len)
-        .filter_map(|(p, row)| {
-            let row_data = &row[..dim];
+        .filter_map(|(logical_idx, physical_idx)| {
+            let start = physical_idx * stride;
+            let row_data = &store.buffer[start..start + dim];
             if row_data.iter().all(|&v| v.as_u128() == 0) {
                 return None;
             }
 
             if filter(row_data) {
-                // 物理 -> 論理インデックス変換
-                let logical_idx = if p < head {
-                    head - 1 - p
-                } else {
-                    cap + head - 1 - p
-                };
                 Some(logical_idx)
             } else {
                 None
@@ -538,7 +540,6 @@ where
         })
         .collect();
 
-    // 論理インデックス(最新順)でソート
     indices.par_sort_unstable();
     indices.truncate(limit);
     indices

@@ -1,17 +1,16 @@
-pub mod fixed;
 pub mod ring;
 
-use crate::types::{LogicMode, OrbitField, SaveMode};
+use crate::types::{LogicMode, PulseCell, SaveMode};
 
 /// `Orby` の内部状態を保持する構造体。
 pub struct OrbyStore {
     pub name: String,
-    pub buffer: Vec<OrbitField>,
+    pub buffer: Vec<PulseCell>,
     pub head: usize,
     pub len: usize,
     pub capacity: usize,
     pub dimension: usize,
-    pub padded_dimension: usize,
+    pub stride: usize,
     pub logic_mode: LogicMode,
     pub storage_mode: SaveMode,
     pub(crate) aof_sender: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
