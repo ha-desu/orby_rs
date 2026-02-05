@@ -1,122 +1,108 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/c3eec46e-f583-4084-9186-56d29d60fde3" width="128" alt="Orby Logo">
+</p>
+
 # Orby (Orbital Observer) v0.2.0 (Alpha) 🌌
-```
 
- ·   ·       ·          ·            ·       ·    ·
-   ·   ____        _             ·      ·      ·
- ·    / __ \      | |            ·    ·      ·    ·
-    ·| |  | |_ __| |__  _   _    ·       ·      ·
- ·   | |  | | '__| '_ \| | | |  ·    ·      ·    ·
-   · | |__| | |  | |_) | |_| |      ·     ·      ·
- ·    \____/|_|  |_.__/ \__, |   ·      ·     ·
-   ·   ·       ·        __/ |   ·    ·      ·    ·
- ·      ·    ·         |___/      ·      ·
+🚨 **開発途中のアルファ版です。本番環境での利用は推奨しません。**
 
-          .         .           .
-```
+Orby（オービィ）は、128bit 固定長データ（UUID v7/v8 等）の走査・検索に特化した、Parallel Arrays方式のインメモリ・インデックスエンジンです。
 
-**Orby（オービィ）** は、128bit 固定長データ（UUID v7/v8 等）の走査・検索に特化した、Parallel Arrays方式のインメモリ・インデックスエンジンを目指しています。
 
 ## 🌌 The Concept
 Orbyのイメージは、マルチプラッタのHDDと物理的に一本のバーで繋がった磁気ヘッドです。
 ある次元のデータを探し当てた瞬間、他の次元の磁気ヘッドも同じ位置を指し示します。同期されたインデックスから100次元のデータでも1次元と同じ速度で引き抜けるはずです。
-それに準えて、Orbital Observer（オービタル・オブザーバー）のOrbyとして命名しました。
+それに準えて、Orbital Observer（オービタル・オブザーバー）略して、Orbyとして命名しました。
 
-## 🛠 Major Evolution 
+## ✨ Key Features
 
-(v0.1.x → v0.2.0)Orby v0.2.0は、内部構造を根本から再定義した「大手術」を経て、以下の進化を遂げました。要素v0.1.x (旧)v0.2.0 (新: Parallel Arrays)最小単位のOrbyPulseCell (128bitデータ)
-セットにしたPulseCellPack (128bitデータの列挙)
-データ保持OrbyLocalStrage (受動的)
-OrbyRingBuffer (動的・循環)
+### 1. Parallel Arrays Architecture
+各次元（レーン）を独立したメモリ領域/ファイルとして管理します。
+特定の次元のスキャンが他次元のキャッシュ効率を妨げず、高いCPUキャッシュヒット率を実現するはずです
 
-## ✨ Key Features of v0.2.0
-Parallel Arrays Architecture:各次元を独立した OrbyRingBuffer として物理的に分離。特定の次元のスキャンが他の次元のキャッシュ効率を妨げることはありません。Zero-Latency Synchronization:すべてのリングは共通の head 位置（磁気ヘッド）を共有しています。次元数が増えても、検索インデックスから他次元データへのアクセスは $O(1)$ のポインタ演算で完了します。Auto-Compaction Ring:旧 Fixed モードを Ring モードへ統合。リングが周回しながら自律的にメモリを詰め、常に最高密度のパルスを維持します。Hardware-Level Safety:物理的に分離されたリング構造により、ある次元のデータ操作が他の次元のメモリ領域を浸食するリスクを根底から排除しました。
+### 2. Vault System (High-Speed Persistence)
+- **SoA (Structure of Arrays) Persistence**: 従来の行指向ではなく、列（レーン）ごとに独立したバイナリファイル (`lane_N.bin`) として保存します。
+- **Parallel Writes**: `rayon` によるスレッドプールを活用し、数万レーンあっても全CPUコアを使って並列に書き込みます。
+- **Durability**: 書き込み時は必ず `fsync` を発行し、OSのキャッシュからディスクへの物理書き込みを保証します。
+- **Deep Sleep**: `sleep()` コマンド一つで、メモリ上の全データを並列かつ安全にディスクへ退避できます。
 
-## 🚀 Quick StartRust// エンジンの初期化 (10,000キャパシティ / 2次元Parallel Arrays)
+### 3. Safety & Performance
+- **Zero-Latency Synchronization**: 全次元が共通のカーソル（リングバッファのヘッド）を共有し、どの次元からでもO(1)で関連データへアクセス可能。
+- **Auto-Compaction**: 削除時にデータをスライドさせて隙間を詰めるコンパクション機能をサポート。
+- **Thread Safety**: 内部は `RwLock` で保護されており、安全に並行アクセスが可能。
+
+---
+
+## 🚀 Quick Start
+
+```rust
+use orby::{Orby, SaveMode, LogicMode};
+
+// 1. エンジンの初期化 (1万レコード / 2次元)
 let orby = Orby::builder("my_pulse_orbit")
     .capacity(10_000)
-    .dimension(2)
-    .with_storage(SaveMode::Sync(Some(path)))
+    .dimension(2) // ring_buffer_lane_count
+    // 永続化設定: Vaultモード (ディレクトリ指定)
+    .with_storage(SaveMode::Vault(Some("./data".into())))
+    .logic_mode(LogicMode::RingBuffer)
     .build()
     .await?;
 
-// レーザー貫通インサート
+// 2. レーザー貫通インサート (Vertical Insert)
 // Store0 と Store1 の同じヘッド位置に同時にパルスを焼き付ける
-orby.insert(vec![id_pulse, data_pulse]).await?;
+let id = 12345u128;
+let val = 99999u128;
+orby.insert_batch(vec![vec![id, val]]).await?;
 
-// 次元0を指定して高速スキャン
-// 合致した共通インデックス（貫通キー）を取得
-let indices = orby.query_raw(0, |cell| cell == target).await?;
+// 3. 高速検索 (Parallel Search)
+// 次元0 (ID列) をスキャンして条件に合うものを探す
+// Rayonによる並列スキャンが自動的に走る
+let results = orby.query_raw(|row| row[0].as_u128() == id, 10);
 
-## ⚠️ Architectural Constraints (制約事項)
-Orbyは「一本のレーザーが全次元を貫通する」という設計思想に基づいているため、以下のユースケースには対応していません。
+// 4. 永続化 (Deep Sleep)
+// 全メモリデータを並列でディスクに書き出し、fsync で保証する
+orby.sleep().await?;
+```
 
-非同期インデックス・アクセス: 「1次元目はn番目、2次元目はm番目」といった、次元ごとに異なるインデックスを一度のリクエストで取得・結合することはできません。
+---
 
-次元ごとの異なるキャパシティ: すべての OrbyRingBuffer は、同一のキャパシティとヘッド位置を共有します。
+## 📖 Operational Recipes
 
-「次元が異なっても、それらは同じ瞬間（Index）のデータである」 というのがOrbyにおけるデータ設計の基本原則です。もしインデックスをずらして取得する必要がある場合は、Orbyの外側（アプリケーションレイヤー）で複数の取得リクエストを組み合わせてください。
+Orbyは設定（LogicMode, SaveMode, Compaction）の組み合わせで多様なユースケースに対応します。
 
+### 1. The Pulse Streamer (無限循環ログ)
+用途: ログ集計、最新ステータスの追跡
+- `compaction(true)`: 削除時は詰める
+- 古いデータはリングバッファの回転により自動的に上書き消滅
 
-🪐 The Philosophy: "Temporal Synchronization" (垂直同期の設計思想)
-Orbyは、各次元のデータに合わせてヘッドをシークすることはしません。
-複数のリングは、一本の固定されたヘッドバー（レーザー）に対して完全に同期して回転しています。
+```rust
+let streamer = Orby::builder("streamer")
+    .capacity(1_000)
+    .compaction(true) // 削除時に詰める
+    .build().await?;
+```
 
-100次元のデータが1次元と同じ速度で、かつ決して「ズレる」ことなく取得できるのは、
-全ての次元が PulseCell (128bit) という厳密な最小単位で管理されているからです。
+### 2. The Static Slot (固定スロット)
+用途: ゲームのインベントリ、固定枠の管理
+- `compaction(false)`: 削除時はゼロ埋め（墓標）してインデックスを維持
+- インデックスが不変のIDとして機能
 
+```rust
+let inventory = Orby::builder("inventory")
+    .capacity(100) // 最大スロット数
+    .compaction(false) // インデックスを固定
+    .build().await?;
+```
 
-## 📖 Orby Architecture Recipes (v0.2.0)
-OrbyはRingBufferを基本思想としていますが、オプションの組み合わせで運用方法を変更することができます。
-ビルドオプションと運用パターンの組み合わせによって、以下の性質を持たせることもできます。
+## ⚠️ Architectural Constraints
 
-### 1. 【基本】 The Pulse Streamer (無限循環キャッシュ)
-最新のパルスを常に追いかけ、古いデータを自動的にパージする標準のモードです。
+1. **次元ごとの独立カーソル不可**: 全次元は常に同期しています。「1次元目はN番目、2次元目はM番目」という状態は持ちません。
+2. **固定長データのみ**: 扱うデータは `u128` (PulseCell) 固定です。可変長データは外部のKVS等に保存し、OrbyにはそのIDやハッシュのみを格納することを推奨します。
 
-用途: ログ集計、最新ステータスの追跡、ストリーミングデータ
+---
 
-Orby設定:
-- capacity(N): 保持したい履歴の数
-- compaction(ON): 常に隙間なくデータを詰める運用
-
-運用:
-- insert() を呼び続けるだけ。
-- len() は常に size() に張り付き、古いものから順に「過去」へ消えていきます。
-
-### 2. 【応用】 The Static Slot (固定長データストア)
-モンスター管理やスロット管理など、インデックス（場所）の不変性を重視するモードです。
-:if orby.len() < orby.size() の時のみ insert を許可する。削除時は対象インデックスを 0（墓標）で上書きする。メリット: index が不変の「ID」として機能し、全次元を $O(1)$ で貫通取得できます。
-
-用途: フィールドのオブジェクト管理、固定枠のステータス管理
-
-Orby設定:
-capacity(N): 最大同時存在数（スロット数）
-compaction(OFF): 削除してもインデックスを動かさない運用（ラッパー側の責任）
-
-運用（ラッパー側の責任）
-- if orby.len() < orby.size() の時のみ insert を許可する。
-- 削除時は対象インデックスを 0（墓標）で上書きする。メリット
-- index が不変の「ID」として機能し、全次元を $O(1)$ で貫通取得できます。
-
-### 3. 【特化】 The Immutable Ledger (追記専用アーカイブ)
-一度書いたものを上書きさせず、末尾に積み上げ続けるモードです。
-
-用途: 変更不可な履歴
-
-Orby設定:
-capacity(N): 物理的な上限
-compaction(OFF): 追記位置を維持
-
-運用:
-insert は常に len() の位置（末尾）に行い、len == size になったら「書き込み禁止」エラーをラッパーで出す。
-
-### 4. 【特化】 The Raw Pulse Inserter (最高速スロット・インサーター)
-データの「整列（並び順）」よりも、**「書き込みのレイテンシを極限まで下げる」**ことを最優先した、スループット特化型のレシピです。
-
-用途: 高頻度ログ、金融取引の生データ、センサーパルス、リアルタイム・テレメトリ
-
-Orby設定:
-capacity(N): 必要十分なバッファサイズ
-compaction(OFF): データの「詰め」作業を完全に排除挙動:
-
-運用上のトレードオフ:
-読み込み側のコスト: 全件スキャン時、有効なデータと墓標（ゼロパルス）が混在しているため、検索レイヤーで「0以外を有効とする」フィルタリングが必要になります。しかし、Orbyの垂直同期SIMD走査なら、この程度のフィルタリングは誤差の範囲内です。
+## 🛠 Major Changes in v0.2.0
+- **Parallel Arrays**: 内部構造を Row-Oriented から Column-Oriented (SoA) に完全刷新。
+- **Vault System**: 旧スナップショット機能を廃止し、より堅牢で高速な Vault 永続化を採用。
+- **Rayon Integration**: クエリおよび永続化の並列処理化。
+- **Error Handling**: `thiserror` ベースの堅牢なエラー型定義 (`OrbyError`)。
