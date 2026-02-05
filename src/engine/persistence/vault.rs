@@ -16,14 +16,12 @@ impl Orby {
             let p = store
                 .vault_path
                 .clone()
-                .ok_or_else(|| OrbyError::IoError("Vault path is not set".into()))?;
+                .ok_or_else(|| OrbyError::Custom("Vault path is not set".into()))?;
             (p, store.capacity, store.ring_buffer_lane_count)
         };
 
         if !vault_path.exists() {
-            tokio::fs::create_dir_all(&vault_path)
-                .await
-                .map_err(|e| OrbyError::IoError(format!("Failed to create vault dir: {}", e)))?;
+            tokio::fs::create_dir_all(&vault_path).await?;
         }
 
         // 1. Initialize Lane Files
@@ -34,16 +32,9 @@ impl Orby {
                 .write(true)
                 .truncate(true)
                 .open(&lane_path)
-                .await
-                .map_err(|e| {
-                    OrbyError::IoError(format!("Failed to create lane file {}: {}", i, e))
-                })?;
-            file.set_len((capacity * 16) as u64)
-                .await
-                .map_err(|e| OrbyError::IoError(e.to_string()))?;
-            file.sync_all()
-                .await
-                .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                .await?;
+            file.set_len((capacity * 16) as u64).await?;
+            file.sync_all().await?;
         }
 
         // 2. Initialize Header File
@@ -53,8 +44,7 @@ impl Orby {
             .write(true)
             .truncate(true)
             .open(&header_path)
-            .await
-            .map_err(|e| OrbyError::IoError(format!("Failed to create header file: {}", e)))?;
+            .await?;
 
         let mut header_data = vec![0u8; 4096];
         header_data[0..16].copy_from_slice(STORAGE_MAGIC_V1);
@@ -64,14 +54,8 @@ impl Orby {
         header_data[40..44].copy_from_slice(&(ring_buffer_lane_count as u32).to_le_bytes()); // lane_count
 
         use tokio::io::AsyncWriteExt;
-        header_file
-            .write_all(&header_data)
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
-        header_file
-            .sync_all()
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        header_file.write_all(&header_data).await?;
+        header_file.sync_all().await?;
 
         Ok(())
     }
@@ -83,23 +67,18 @@ impl Orby {
             store
                 .vault_path
                 .clone()
-                .ok_or_else(|| OrbyError::IoError("Vault path is not set".into()))?
+                .ok_or_else(|| OrbyError::Custom("Vault path is not set".into()))?
         };
 
         let header_path = vault_path.join("header.bin");
-        let mut header_file = tokio::fs::File::open(&header_path)
-            .await
-            .map_err(|e| OrbyError::IoError(format!("Failed to open header.bin: {}", e)))?;
+        let mut header_file = tokio::fs::File::open(&header_path).await?;
 
         let mut header_data = [0u8; 4096];
         use tokio::io::AsyncReadExt;
-        header_file
-            .read_exact(&mut header_data)
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        header_file.read_exact(&mut header_data).await?;
 
         if &header_data[0..16] != STORAGE_MAGIC_V1 {
-            return Err(OrbyError::IoError(
+            return Err(OrbyError::InvalidFormat(
                 "Invalid magic number in header.bin".into(),
             ));
         }
@@ -122,11 +101,9 @@ impl Orby {
             // Size validation for lanes
             for i in 0..v_dim {
                 let lane_path = vault_path.join(format!("lane_{}.bin", i));
-                let metadata = std::fs::metadata(&lane_path).map_err(|e| {
-                    OrbyError::IoError(format!("Lane {} missing or inaccessible: {}", i, e))
-                })?;
+                let metadata = std::fs::metadata(&lane_path)?;
                 if metadata.len() != (v_cap * 16) as u64 {
-                    return Err(OrbyError::IoError(format!(
+                    return Err(OrbyError::Custom(format!(
                         "Lane {} size mismatch. Expected {}, found {}",
                         i,
                         v_cap * 16,
@@ -138,18 +115,16 @@ impl Orby {
             store.len = v_len;
             store.cursor = v_cursor;
 
-            // Load to memory if not Direct mode
+            // Load to memory
             if !store.lanes.is_empty() && !store.lanes[0].buffer.is_empty() {
                 for i in 0..v_dim {
                     let lane_path = vault_path.join(format!("lane_{}.bin", i));
-                    let mut f = std::fs::File::open(&lane_path)
-                        .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                    let mut f = std::fs::File::open(&lane_path)?;
 
                     // Bulk read lane
                     let mut buf = vec![0u8; v_cap * 16];
                     use std::io::Read;
-                    f.read_exact(&mut buf)
-                        .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                    f.read_exact(&mut buf)?;
 
                     for (row, chunk) in buf.chunks_exact(16).enumerate() {
                         let val = u128::from_le_bytes(chunk.try_into().unwrap());
@@ -183,10 +158,7 @@ impl Orby {
             let lane_files: Vec<std::fs::File> = (0..ring_buffer_lane_count)
                 .map(|i| {
                     let p = vault_path.join(format!("lane_{}.bin", i));
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(p)
-                        .map_err(|e| OrbyError::IoError(e.to_string()))
+                    std::fs::OpenOptions::new().write(true).open(p)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -195,22 +167,19 @@ impl Orby {
                 for (col, &val) in row.iter().enumerate() {
                     if col < ring_buffer_lane_count {
                         let bytes = val.to_le_bytes();
-                        lane_files[col]
-                            .write_at(&bytes, (physical_idx * 16) as u64)
-                            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                        lane_files[col].write_at(&bytes, (physical_idx * 16) as u64)?;
                     }
                 }
             }
 
             // 2. fsync all lanes
             for f in &lane_files {
-                f.sync_all()
-                    .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                f.sync_all()?;
             }
             Ok::<(), OrbyError>(())
         })
         .await
-        .map_err(|e| OrbyError::IoError(e.to_string()))??;
+        .map_err(|e| OrbyError::Custom(format!("Blocking task join error: {}", e)))??;
 
         // 3. Update Header
         self.commit_vault_header().await?;
@@ -239,14 +208,10 @@ impl Orby {
             // 1. ターゲットレーンへのバルク I/O
             {
                 let p = vault_path.join(format!("lane_{}.bin", lane_idx));
-                let f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(p)
-                    .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                let f = std::fs::OpenOptions::new().write(true).open(p)?;
 
                 this.bulk_write_lane_file(&f, start_index, capacity, &values)?;
-                f.sync_all()
-                    .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                f.sync_all()?;
             }
 
             // 2. 他の全てのレーンに対して、同じインデックス範囲をゼロ埋め（垂直同期）
@@ -256,19 +221,15 @@ impl Orby {
                     continue;
                 }
                 let p = vault_path.join(format!("lane_{}.bin", col));
-                let f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(p)
-                    .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                let f = std::fs::OpenOptions::new().write(true).open(p)?;
 
                 this.bulk_write_lane_file(&f, start_index, capacity, &zeros)?;
-                f.sync_all()
-                    .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                f.sync_all()?;
             }
             Ok::<(), OrbyError>(())
         })
         .await
-        .map_err(|e| OrbyError::IoError(e.to_string()))??;
+        .map_err(|e| OrbyError::Custom(format!("Blocking task join error: {}", e)))??;
 
         // 3. ヘッダー更新
         self.commit_vault_header().await?;
@@ -290,8 +251,7 @@ impl Orby {
         if end_idx <= capacity {
             // ケースA: ラップアラウンドなし。単一の I/O
             let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            f.write_at(&bytes, (start_idx * 16) as u64)
-                .map_err(|e| OrbyError::IoError(e.to_string()))?;
+            f.write_at(&bytes, (start_idx * 16) as u64)?;
         } else {
             // ケースB: ラップアラウンドあり。2回に分割
             let len_to_end = capacity - start_idx;
@@ -301,16 +261,14 @@ impl Orby {
                 .iter()
                 .flat_map(|v| v.to_le_bytes())
                 .collect();
-            f.write_at(&bytes1, (start_idx * 16) as u64)
-                .map_err(|e| OrbyError::IoError(e.to_string()))?;
+            f.write_at(&bytes1, (start_idx * 16) as u64)?;
 
             // 2. 先頭から
             let bytes2: Vec<u8> = values[len_to_end..]
                 .iter()
                 .flat_map(|v| v.to_le_bytes())
                 .collect();
-            f.write_at(&bytes2, 0)
-                .map_err(|e| OrbyError::IoError(e.to_string()))?;
+            f.write_at(&bytes2, 0)?;
         }
         Ok(())
     }
@@ -324,32 +282,18 @@ impl Orby {
         let mut header_file = tokio::fs::OpenOptions::new()
             .write(true)
             .open(&header_path)
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+            .await?;
 
         use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-        header_file
-            .seek(std::io::SeekFrom::Start(24))
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
-        header_file
-            .write_all(&(len as u64).to_le_bytes())
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        header_file.seek(std::io::SeekFrom::Start(24)).await?;
+        header_file.write_all(&(len as u64).to_le_bytes()).await?;
 
-        header_file
-            .seek(std::io::SeekFrom::Start(32))
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        header_file.seek(std::io::SeekFrom::Start(32)).await?;
         header_file
             .write_all(&(cursor as u64).to_le_bytes())
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+            .await?;
 
-        header_file
-            .sync_all()
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        header_file.sync_all().await?;
         Ok(())
     }
 
@@ -372,11 +316,7 @@ impl Orby {
             let lane_files: Vec<std::fs::File> = (0..ring_buffer_lane_count)
                 .map(|i| {
                     let p = vault_path.join(format!("lane_{}.bin", i));
-                    OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(p)
-                        .map_err(|e| OrbyError::IoError(e.to_string()))
+                    OpenOptions::new().read(true).write(true).open(p)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -397,25 +337,21 @@ impl Orby {
                         let write_offset = (current_pos * 16) as u64;
                         let byte_count = to_read * 16;
 
-                        f.read_at(&mut buffer[..byte_count], read_offset)
-                            .map_err(|e| OrbyError::IoError(e.to_string()))?;
-                        f.write_at(&buffer[..byte_count], write_offset)
-                            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                        f.read_at(&mut buffer[..byte_count], read_offset)?;
+                        f.write_at(&buffer[..byte_count], write_offset)?;
 
                         current_pos += to_read;
                     }
                     // Zero out the last slot
                     let zeros = [0u8; 16];
-                    f.write_at(&zeros, ((capacity - 1) * 16) as u64)
-                        .map_err(|e| OrbyError::IoError(e.to_string()))?;
-                    f.sync_all()
-                        .map_err(|e| OrbyError::IoError(e.to_string()))?;
+                    f.write_at(&zeros, ((capacity - 1) * 16) as u64)?;
+                    f.sync_all()?;
                 }
             }
             Ok::<(), OrbyError>(())
         })
         .await
-        .map_err(|e| OrbyError::IoError(e.to_string()))??;
+        .map_err(|e| OrbyError::Custom(format!("Blocking task join error: {}", e)))??;
 
         // Update Header
         self.commit_vault_header().await?;
@@ -430,7 +366,7 @@ impl Orby {
             let p = store
                 .vault_path
                 .clone()
-                .ok_or_else(|| OrbyError::IoError("Vault path is not set".into()))?;
+                .ok_or_else(|| OrbyError::Custom("Vault path is not set".into()))?;
             (p, store.capacity, store.ring_buffer_lane_count)
         };
 
@@ -443,16 +379,11 @@ impl Orby {
             });
         }
 
-        let mut header_file = tokio::fs::File::open(&header_path)
-            .await
-            .map_err(|e| OrbyError::IoError(format!("Failed to open header.bin: {}", e)))?;
+        let mut header_file = tokio::fs::File::open(&header_path).await?;
 
         let mut header_data = [0u8; 4096];
         use tokio::io::AsyncReadExt;
-        header_file
-            .read_exact(&mut header_data)
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        header_file.read_exact(&mut header_data).await?;
 
         if &header_data[0..16] != STORAGE_MAGIC_V1 {
             return Err(OrbyError::ConfigMismatch {
@@ -507,14 +438,10 @@ impl Orby {
             let cap = v_cap;
 
             let handle = tokio::task::spawn_blocking(move || {
-                let mut f = std::fs::File::open(&lane_path).map_err(|e| {
-                    OrbyError::IoError(format!("Failed to open lane {}: {}", lane_idx, e))
-                })?;
+                let mut f = std::fs::File::open(&lane_path)?;
                 let mut buf = vec![0u8; cap * 16];
                 use std::io::Read;
-                f.read_exact(&mut buf).map_err(|e| {
-                    OrbyError::IoError(format!("Read error in lane {}: {}", lane_idx, e))
-                })?;
+                f.read_exact(&mut buf)?;
                 Ok::<(usize, Vec<u8>), OrbyError>((lane_idx, buf))
             });
             join_handles.push(handle);
@@ -526,9 +453,9 @@ impl Orby {
             store.cursor = v_cursor;
 
             for handle in join_handles {
-                let (lane_idx, buf) = handle.await.map_err(|e| {
-                    OrbyError::IoError(format!("Blocking task join error: {}", e))
-                })??;
+                let (lane_idx, buf) = handle
+                    .await
+                    .map_err(|e| OrbyError::Custom(format!("Blocking task join error: {}", e)))??;
 
                 if !store.lanes.is_empty() && !store.lanes[lane_idx].buffer.is_empty() {
                     for (row, chunk) in buf.chunks_exact(16).enumerate() {

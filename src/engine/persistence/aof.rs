@@ -41,13 +41,9 @@ impl Orby {
     }
 
     pub(crate) async fn replay_aof(&self, path: PathBuf) -> Result<(), OrbyError> {
-        let mut file = tokio::fs::File::open(&path)
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        let mut file = tokio::fs::File::open(&path).await?;
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .await
-            .map_err(|e| OrbyError::IoError(e.to_string()))?;
+        file.read_to_end(&mut buffer).await?;
 
         let mut pos = 0;
         let dim = self.meta().2;

@@ -191,7 +191,7 @@ impl OrbyBuilder {
 
     async fn handle_restore_static(engine: &Orby, path: PathBuf) -> Result<(), OrbyError> {
         if !path.exists() {
-            return Err(OrbyError::IoError(format!(
+            return Err(OrbyError::Custom(format!(
                 "Restore path not found: {:?}",
                 path
             )));
@@ -206,7 +206,7 @@ impl OrbyBuilder {
             "aof" => engine.replay_aof(path).await?,
             _ if path.is_dir() => engine.restore_from_vault().await?,
             _ => {
-                return Err(OrbyError::IoError(format!(
+                return Err(OrbyError::Custom(format!(
                     "Unsupported restore format: {:?}",
                     path
                 )))

@@ -44,5 +44,9 @@ pub enum OrbyError {
 
     /// IOエラー
     #[error("Orby: I/O Error: {0}")]
-    IoError(String),
+    IoError(#[from] std::io::Error),
+
+    /// その他カスタムエラー
+    #[error("Orby: {0}")]
+    Custom(String),
 }
