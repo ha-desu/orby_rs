@@ -116,6 +116,38 @@ fn bench_comparison(c: &mut Criterion) {
         })
     });
 
+    // Vault Mode Logic
+    let engine_vault = rt.block_on(async {
+        let path = std::path::PathBuf::from("bench_vault");
+        if path.exists() {
+            std::fs::remove_dir_all(&path).unwrap();
+        }
+        let obs = Orby::new(
+            "ring_vault",
+            total_records,
+            dimension,
+            SaveMode::Vault(Some(path.clone())),
+            LogicMode::RingBuffer,
+        )
+        .await
+        .unwrap();
+        obs.insert_batch(&data).await.unwrap();
+        obs
+    });
+
+    group.bench_function("03_Orby_RingBuffer_Vault", |b| {
+        b.iter(|| {
+            let res =
+                engine_vault.query_raw(|row| following_ids.contains(&row[1].as_u128()), limit);
+            black_box(res);
+        })
+    });
+
+    // Clean up
+    if std::path::PathBuf::from("bench_vault").exists() {
+        std::fs::remove_dir_all("bench_vault").unwrap();
+    }
+
     group.finish();
 }
 
