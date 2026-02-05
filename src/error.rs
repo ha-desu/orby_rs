@@ -18,6 +18,10 @@ pub enum OrbyError {
         found: usize,
     },
 
+    /// 設定不一致
+    #[error("Orby: Configuration mismatch for '{name}': {reason}")]
+    ConfigMismatch { name: String, reason: String },
+
     /// 内部状態の矛盾
     #[error("Orby: Internal consistency check failed for '{name}': {message}")]
     InconsistentState { name: String, message: String },

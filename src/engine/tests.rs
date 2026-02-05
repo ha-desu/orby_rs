@@ -282,3 +282,96 @@ async fn test_insert_lane_batch() {
     // 最新は 1200
     assert_eq!(engine.get_at(0).unwrap()[0], 1200);
 }
+
+#[tokio::test]
+async fn test_vault_autoload() {
+    let label = "test_vault_autoload";
+    let db_path = std::env::temp_dir().join(format!("orby_vault_{}", label));
+    if db_path.exists() {
+        let _ = std::fs::remove_dir_all(&db_path);
+    }
+
+    // 1. 初回起動とデータ投入
+    {
+        let engine = Orby::builder(label)
+            .ring_buffer_lane_item_count(10)
+            .ring_buffer_lane_count(2)
+            .with_storage(crate::types::SaveMode::Vault(Some(
+                db_path.parent().unwrap().to_path_buf(),
+            )))
+            .build()
+            .await
+            .unwrap();
+
+        engine
+            .insert_batch(&[[101, 201], [102, 202]])
+            .await
+            .unwrap();
+    } // engine is dropped here
+
+    // 2. 再起動とオートロード
+    {
+        let engine = Orby::builder(label)
+            .ring_buffer_lane_item_count(10)
+            .ring_buffer_lane_count(2)
+            .with_storage(crate::types::SaveMode::Vault(Some(
+                db_path.parent().unwrap().to_path_buf(),
+            )))
+            .autoload(true)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(engine.len(), 2);
+        let items = engine.take(2);
+        assert_eq!(items[0][0], 102);
+        assert_eq!(items[0][1], 202);
+        assert_eq!(items[1][0], 101);
+        assert_eq!(items[1][1], 201);
+    }
+
+    let _ = std::fs::remove_dir_all(&db_path);
+}
+
+#[tokio::test]
+async fn test_vault_config_mismatch() {
+    let label = "test_vault_mismatch";
+    let db_path = std::env::temp_dir().join(format!("orby_vault_{}", label));
+    if db_path.exists() {
+        let _ = std::fs::remove_dir_all(&db_path);
+    }
+
+    // 1. 2レーンで作成
+    {
+        let _engine = Orby::builder(label)
+            .ring_buffer_lane_item_count(10)
+            .ring_buffer_lane_count(2)
+            .with_storage(crate::types::SaveMode::Vault(Some(
+                db_path.parent().unwrap().to_path_buf(),
+            )))
+            .build()
+            .await
+            .unwrap();
+    }
+
+    // 2. 3レーンで起動しようとするとエラー
+    {
+        let result = Orby::builder(label)
+            .ring_buffer_lane_item_count(10)
+            .ring_buffer_lane_count(3) // mismatch
+            .with_storage(crate::types::SaveMode::Vault(Some(
+                db_path.parent().unwrap().to_path_buf(),
+            )))
+            .autoload(true)
+            .build()
+            .await;
+
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            OrbyError::ConfigMismatch { .. } => {}
+            e => panic!("Expected ConfigMismatch, got {:?}", e),
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&db_path);
+}

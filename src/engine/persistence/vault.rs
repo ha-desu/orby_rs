@@ -423,42 +423,122 @@ impl Orby {
         Ok(())
     }
 
-    /// 特定の次元（レーン）の、特定のインデックスのみをストレージから抽出します。
-    /// 戻り値は Vec<u128> だが、内部的にはスタックアロケーションに近い効率を目指す。
-    pub fn load_to_stack_reactor(
-        &self,
-        lane_ids: &[usize],
-        index: usize,
-    ) -> Result<Vec<u128>, OrbyError> {
-        let (vault_path, capacity) = {
+    /// 既存の Vault データを検証し、メモリへ並列ロードします。
+    pub(crate) async fn validate_and_load_vault(&self, strict: bool) -> Result<(), OrbyError> {
+        let (vault_path, expected_cap, expected_dim) = {
             let store = self.inner.read();
-            (
-                store
-                    .vault_path
-                    .clone()
-                    .ok_or(OrbyError::IoError("Vault not enabled".into()))?,
-                store.capacity,
-            )
+            let p = store
+                .vault_path
+                .clone()
+                .ok_or_else(|| OrbyError::IoError("Vault path is not set".into()))?;
+            (p, store.capacity, store.ring_buffer_lane_count)
         };
 
-        if index >= capacity {
-            return Err(OrbyError::IoError("Index out of bounds".into()));
+        // 1. Metadata Validation (header.bin)
+        let header_path = vault_path.join("header.bin");
+        if !header_path.exists() {
+            return Err(OrbyError::ConfigMismatch {
+                name: self.name(),
+                reason: "header.bin not found in existing vault".into(),
+            });
         }
 
-        let offset = (index * 16) as u64;
+        let mut header_file = tokio::fs::File::open(&header_path)
+            .await
+            .map_err(|e| OrbyError::IoError(format!("Failed to open header.bin: {}", e)))?;
 
-        let results: Vec<u128> = lane_ids
-            .iter()
-            .map(|&lane_id| {
-                let p = vault_path.join(format!("lane_{}.bin", lane_id));
-                let f = File::open(p).map_err(|e| OrbyError::IoError(e.to_string()))?;
-                let mut buf = [0u8; 16];
-                f.read_at(&mut buf, offset)
-                    .map_err(|e| OrbyError::IoError(e.to_string()))?;
-                Ok(u128::from_le_bytes(buf))
-            })
-            .collect::<Result<Vec<_>, OrbyError>>()?;
+        let mut header_data = [0u8; 4096];
+        use tokio::io::AsyncReadExt;
+        header_file
+            .read_exact(&mut header_data)
+            .await
+            .map_err(|e| OrbyError::IoError(e.to_string()))?;
 
-        Ok(results)
+        if &header_data[0..16] != STORAGE_MAGIC_V1 {
+            return Err(OrbyError::ConfigMismatch {
+                name: self.name(),
+                reason: "Invalid magic number in existing vault".into(),
+            });
+        }
+
+        let v_cap = u64::from_le_bytes(header_data[16..24].try_into().unwrap()) as usize;
+        let v_len = u64::from_le_bytes(header_data[24..32].try_into().unwrap()) as usize;
+        let v_cursor = u64::from_le_bytes(header_data[32..40].try_into().unwrap()) as usize;
+        let v_dim = u32::from_le_bytes(header_data[40..44].try_into().unwrap()) as usize;
+
+        if v_cap != expected_cap || v_dim != expected_dim {
+            return Err(OrbyError::ConfigMismatch {
+                name: self.name(),
+                reason: format!(
+                    "Vault configuration mismatch. Expected cap={}, dim={}, but found cap={}, dim={}",
+                    expected_cap, expected_dim, v_cap, v_dim
+                ),
+            });
+        }
+
+        // 2. Physical Integrity Check
+        if strict {
+            for i in 0..v_dim {
+                let lane_path = vault_path.join(format!("lane_{}.bin", i));
+                let metadata =
+                    std::fs::metadata(&lane_path).map_err(|e| OrbyError::ConfigMismatch {
+                        name: self.name(),
+                        reason: format!("Lane {} missing or inaccessible: {}", i, e),
+                    })?;
+                if metadata.len() != (v_cap * 16) as u64 {
+                    return Err(OrbyError::ConfigMismatch {
+                        name: self.name(),
+                        reason: format!(
+                            "Lane {} size mismatch. Expected {}, found {}",
+                            i,
+                            v_cap * 16,
+                            metadata.len()
+                        ),
+                    });
+                }
+            }
+        }
+
+        // 3. Fast Deployment (Parallel Load)
+        let mut join_handles = Vec::with_capacity(v_dim);
+        for i in 0..v_dim {
+            let lane_path = vault_path.join(format!("lane_{}.bin", i));
+            let lane_idx = i;
+            let cap = v_cap;
+
+            let handle = tokio::task::spawn_blocking(move || {
+                let mut f = std::fs::File::open(&lane_path).map_err(|e| {
+                    OrbyError::IoError(format!("Failed to open lane {}: {}", lane_idx, e))
+                })?;
+                let mut buf = vec![0u8; cap * 16];
+                use std::io::Read;
+                f.read_exact(&mut buf).map_err(|e| {
+                    OrbyError::IoError(format!("Read error in lane {}: {}", lane_idx, e))
+                })?;
+                Ok::<(usize, Vec<u8>), OrbyError>((lane_idx, buf))
+            });
+            join_handles.push(handle);
+        }
+
+        {
+            let mut store = self.inner.write();
+            store.len = v_len;
+            store.cursor = v_cursor;
+
+            for handle in join_handles {
+                let (lane_idx, buf) = handle.await.map_err(|e| {
+                    OrbyError::IoError(format!("Blocking task join error: {}", e))
+                })??;
+
+                if !store.lanes.is_empty() && !store.lanes[lane_idx].buffer.is_empty() {
+                    for (row, chunk) in buf.chunks_exact(16).enumerate() {
+                        let val = u128::from_le_bytes(chunk.try_into().unwrap());
+                        store.lanes[lane_idx].buffer[row] = crate::types::PulseCell::new(val);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
